@@ -127,4 +127,7 @@ type Flags struct {
 
 	// Dwarf5 enables DWARF version 5 debug info generation.
 	Dwarf5 bool
+
+	// WasmThreads enables support for multithreading on GOARCH=wasm
+	WasmThreads bool
 }
