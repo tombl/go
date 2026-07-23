@@ -5,6 +5,7 @@
 package syscall
 
 import (
+	"internal/abi"
 	"runtime"
 	"unsafe"
 )
@@ -22,6 +23,220 @@ func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr) {
 //go:nosplit
 func rawVforkSyscall(trap, a1, a2, a3 uintptr) (r1 uintptr, err Errno) {
 	return 0, ENOSYS
+}
+
+const wasmExecStackSize = 64 << 10
+
+var wasmExecStack [wasmExecStackSize]byte
+
+type wasmExecArgs struct {
+	stack     uintptr
+	path      *byte
+	argv      *uint32
+	envv      *uint32
+	dir       *byte
+	chroot    *byte
+	files     *int32
+	fileCount uint32
+	errorFD   int32
+	sigmask   [2]uint32
+}
+
+type wasmSigaction struct {
+	handler  uint32
+	flags    uint32
+	restorer uint32
+	mask     [2]uint32
+}
+
+func wasmExecChild()
+
+func wasmPointerVector(pointers []*byte) []uint32 {
+	wire := make([]uint32, len(pointers))
+	for i, p := range pointers {
+		wire[i] = wasmPointer(unsafe.Pointer(p))
+	}
+	return wire
+}
+
+func wasmExecve(path *byte, argv, envv []*byte) error {
+	wargv := wasmPointerVector(argv)
+	wenvv := wasmPointerVector(envv)
+	_, _, errno := RawSyscall(SYS_EXECVE,
+		uintptr(unsafe.Pointer(path)),
+		uintptr(unsafe.Pointer(&wargv[0])),
+		uintptr(unsafe.Pointer(&wenvv[0])))
+	runtime.KeepAlive(argv)
+	runtime.KeepAlive(envv)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func wasmForkAndExec(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid int, err Errno) {
+	if sys.Credential != nil || sys.Ptrace || sys.Setsid || sys.Setpgid || sys.Setctty || sys.Noctty || sys.Foreground ||
+		sys.Pdeathsig != 0 || sys.Cloneflags != 0 || sys.Unshareflags != 0 || len(sys.UidMappings) != 0 ||
+		len(sys.GidMappings) != 0 || len(sys.AmbientCaps) != 0 || sys.UseCgroupFD || sys.PidFD != nil {
+		return 0, EOPNOTSUPP
+	}
+
+	wargv := wasmPointerVector(argv)
+	wenvv := wasmPointerVector(envv)
+	childFiles := make([]int32, len(attr.Files))
+	minFD := len(attr.Files) + 1
+	if minFD <= pipe {
+		minFD = pipe + 1
+	}
+	for i, fd := range attr.Files {
+		if fd == ^uintptr(0) {
+			childFiles[i] = -1
+			continue
+		}
+		r, _, errno := Syscall(SYS_FCNTL, fd, F_DUPFD_CLOEXEC, uintptr(minFD))
+		if errno != 0 {
+			for _, duplicated := range childFiles[:i] {
+				if duplicated >= 0 {
+					Close(int(duplicated))
+				}
+			}
+			return 0, errno
+		}
+		childFiles[i] = int32(r)
+		if int(r) >= minFD {
+			minFD = int(r) + 1
+		}
+	}
+	childErrorFD, _, errno := Syscall(SYS_FCNTL, uintptr(pipe), F_DUPFD_CLOEXEC, uintptr(minFD))
+	if errno != 0 {
+		for _, duplicated := range childFiles {
+			if duplicated >= 0 {
+				Close(int(duplicated))
+			}
+		}
+		return 0, errno
+	}
+
+	args := wasmExecArgs{
+		stack:     uintptr(unsafe.Pointer(&wasmExecStack[len(wasmExecStack)-16])),
+		path:      argv0,
+		argv:      &wargv[0],
+		envv:      &wenvv[0],
+		dir:       dir,
+		chroot:    chroot,
+		fileCount: uint32(len(childFiles)),
+		errorFD:   int32(childErrorFD),
+	}
+	if len(childFiles) != 0 {
+		args.files = &childFiles[0]
+	}
+
+	// Keep the child from running a Go signal handler before exec. Pinning
+	// this goroutine makes the saved and restored masks belong to the same
+	// kernel thread, while CLONE_VFORK keeps the parent stopped until the
+	// child has either execed or exited.
+	runtime.LockOSThread()
+	var oldMask [2]uint32
+	_, _, errno = RawSyscall6(SYS_RT_SIGPROCMASK, 2, 0, uintptr(unsafe.Pointer(&oldMask[0])), unsafe.Sizeof(oldMask), 0, 0)
+	if errno == 0 {
+		allSignals := [2]uint32{^uint32(0), ^uint32(0)}
+		_, _, errno = RawSyscall6(SYS_RT_SIGPROCMASK, 2, uintptr(unsafe.Pointer(&allSignals[0])), 0, unsafe.Sizeof(allSignals), 0, 0)
+	}
+	if errno != 0 {
+		runtime.UnlockOSThread()
+		for _, duplicated := range childFiles {
+			if duplicated >= 0 {
+				Close(int(duplicated))
+			}
+		}
+		Close(int(childErrorFD))
+		return 0, errno
+	}
+	args.sigmask = oldMask
+
+	fn := uintptr(abi.FuncPCABI0(wasmExecChild)) >> 16
+	const flags = CLONE_VM | CLONE_VFORK | uintptr(SIGCHLD)
+	r1, _, errno := Syscall6(SYS_CLONE, fn, uintptr(unsafe.Pointer(&args)), flags, 0, 0, 0)
+	RawSyscall6(SYS_RT_SIGPROCMASK, 2, uintptr(unsafe.Pointer(&oldMask[0])), 0, unsafe.Sizeof(oldMask), 0, 0)
+	runtime.UnlockOSThread()
+	for _, duplicated := range childFiles {
+		if duplicated >= 0 {
+			Close(int(duplicated))
+		}
+	}
+	Close(int(childErrorFD))
+	runtime.KeepAlive(argv)
+	runtime.KeepAlive(envv)
+	runtime.KeepAlive(wargv)
+	runtime.KeepAlive(wenvv)
+	runtime.KeepAlive(childFiles)
+	runtime.KeepAlive(args)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(r1), 0
+}
+
+//go:nosplit
+//go:norace
+func wasmExecChildGo(args *wasmExecArgs) {
+	files := unsafe.Slice(args.files, args.fileCount)
+	for target, source := range files {
+		if source < 0 {
+			RawSyscall(SYS_CLOSE, uintptr(target), 0, 0)
+			continue
+		}
+		if _, _, errno := RawSyscall(SYS_DUP3, uintptr(source), uintptr(target), 0); errno != 0 {
+			wasmExecChildError(args, errno)
+		}
+		RawSyscall(SYS_CLOSE, uintptr(source), 0, 0)
+	}
+	if args.chroot != nil {
+		if _, _, errno := RawSyscall(SYS_CHROOT, uintptr(unsafe.Pointer(args.chroot)), 0, 0); errno != 0 {
+			wasmExecChildError(args, errno)
+		}
+	}
+	if args.dir != nil {
+		if _, _, errno := RawSyscall(SYS_CHDIR, uintptr(unsafe.Pointer(args.dir)), 0, 0); errno != 0 {
+			wasmExecChildError(args, errno)
+		}
+	}
+	// Caught signal handlers point into the parent's Go runtime and cannot
+	// safely run in this pre-exec child. Preserve SIG_IGN, as exec does, but
+	// reset every caught disposition before unblocking signals.
+	var oldAction wasmSigaction
+	var defaultAction wasmSigaction
+	for sig := uintptr(1); sig <= 64; sig++ {
+		if sig == uintptr(SIGKILL) || sig == uintptr(SIGSTOP) {
+			continue
+		}
+		_, _, errno := RawSyscall6(SYS_RT_SIGACTION, sig, 0, uintptr(unsafe.Pointer(&oldAction)), unsafe.Sizeof(oldAction.mask), 0, 0)
+		if errno == EINVAL {
+			continue
+		}
+		if errno != 0 {
+			wasmExecChildError(args, errno)
+		}
+		if oldAction.handler > 1 {
+			if _, _, errno := RawSyscall6(SYS_RT_SIGACTION, sig, uintptr(unsafe.Pointer(&defaultAction)), 0, unsafe.Sizeof(defaultAction.mask), 0, 0); errno != 0 {
+				wasmExecChildError(args, errno)
+			}
+		}
+	}
+	if _, _, errno := RawSyscall6(SYS_RT_SIGPROCMASK, 2, uintptr(unsafe.Pointer(&args.sigmask[0])), 0, unsafe.Sizeof(args.sigmask), 0, 0); errno != 0 {
+		wasmExecChildError(args, errno)
+	}
+	_, _, errno := RawSyscall(SYS_EXECVE, uintptr(unsafe.Pointer(args.path)), uintptr(unsafe.Pointer(args.argv)), uintptr(unsafe.Pointer(args.envv)))
+	wasmExecChildError(args, errno)
+}
+
+//go:nosplit
+//go:norace
+func wasmExecChildError(args *wasmExecArgs, errno Errno) {
+	RawSyscall(SYS_WRITE, uintptr(args.errorFD), uintptr(unsafe.Pointer(&errno)), unsafe.Sizeof(errno))
+	RawSyscall(SYS_EXIT, 253, 0, 0)
+	for {
+	}
 }
 
 const (
@@ -111,6 +326,18 @@ type wasmMsghdr struct {
 
 func wasmPointer(p unsafe.Pointer) uint32 {
 	return uint32(uintptr(p))
+}
+
+func setsockoptSockFprog(fd int, program *SockFprog) error {
+	wprogram := struct {
+		Len    uint16
+		_pad   uint16
+		Filter uint32
+	}{
+		Len:    program.Len,
+		Filter: wasmPointer(unsafe.Pointer(program.Filter)),
+	}
+	return setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, unsafe.Pointer(&wprogram), unsafe.Sizeof(wprogram))
 }
 
 func wasmMsghdrFor(msg *Msghdr) (wasmMsghdr, []wasmIovec, error) {

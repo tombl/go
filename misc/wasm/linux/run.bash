@@ -33,13 +33,17 @@ trap 'rm -rf -- "$work_dir"' EXIT
 	cd -- "$script_dir"
 	GOOS=linux GOARCH=wasm CGO_ENABLED=0 \
 		"$go_binary" test -c -o "$work_dir/init" .
+	GOOS=linux GOARCH=wasm CGO_ENABLED=0 \
+		"$go_binary" build -o "$work_dir/child" ./testdata/child.go
+	GOOS=linux GOARCH=wasm CGO_ENABLED=0 \
+		"$go_binary" build -o "$work_dir/grandchild" ./testdata/grandchild.go
 )
 if command -v wasm-validate >/dev/null; then
 	wasm-validate --enable-threads "$work_dir/init"
 fi
 (
 	cd -- "$work_dir"
-	printf 'init\n' | cpio --quiet -o -H newc >initramfs.cpio
+	printf 'init\nchild\ngrandchild\n' | cpio --quiet -o -H newc >initramfs.cpio
 )
 
 timeout --kill-after=5 300 node "$runner" \

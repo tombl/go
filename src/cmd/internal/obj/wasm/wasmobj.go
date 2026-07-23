@@ -1055,6 +1055,8 @@ var notUsePC_B = map[string]bool{
 	"wasm_export_resume":      true,
 	"wasm_export_getsp":       true,
 	"runtime.wasmMstart":      true,
+	"runtime.wasmSigtramp":    true,
+	"syscall.wasmExecChild":   true,
 	"wasm_pc_f_loop":          true,
 	"wasm_pc_f_loop_export":   true,
 	"gcWriteBarrier":          true,
@@ -1115,6 +1117,12 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		useAssemblyRegMap()
 	case "runtime.wasmMstart":
 		varDecls = []*varDecl{{count: 3, typ: i64}}
+		useAssemblyRegMap()
+	case "syscall.wasmExecChild":
+		varDecls = []*varDecl{{count: 2, typ: i64}}
+		useAssemblyRegMap()
+	case "runtime.wasmSigtramp":
+		varDecls = []*varDecl{{count: 5, typ: i64}}
 		useAssemblyRegMap()
 	case "wasm_pc_f_loop_export":
 		varDecls = []*varDecl{{count: 2, typ: i32}}

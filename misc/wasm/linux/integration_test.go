@@ -2,16 +2,22 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build linux && wasm
+
 package linuxwasmtest
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -172,6 +178,84 @@ func TestNativeThreads(t *testing.T) {
 		t.Fatalf("counter = %d, want 8000", counter)
 	}
 	runtime.GC()
+}
+
+func TestSignalCallback(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGUSR1)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-signals:
+		if got != syscall.SIGUSR1 {
+			t.Fatalf("received %v, want SIGUSR1", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("signal callback did not reach os/signal")
+	}
+	signal.Stop(signals)
+
+	// Notify must remember an inherited ignored disposition and restore it
+	// when the notification is stopped.
+	signal.Ignore(syscall.SIGUSR2)
+	signal.Notify(signals, syscall.SIGUSR2)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR2); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-signals:
+		if got != syscall.SIGUSR2 {
+			t.Fatalf("received %v, want SIGUSR2", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("signal callback did not replace SIG_IGN")
+	}
+	signal.Stop(signals)
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR2); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	signal.Reset(syscall.SIGUSR2)
+}
+
+func TestExec(t *testing.T) {
+	cmd := exec.Command("/child", "argument")
+	cmd.Dir = "/"
+	cmd.Env = []string{"GO_WASM_CHILD=ok"}
+	cmd.Stdin = bytes.NewReader(nil)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "child:ok cwd=/\n"; string(output) != want {
+		t.Fatalf("child output = %q, want %q", output, want)
+	}
+	cmd = exec.Command("/child", "exec")
+	cmd.Env = []string{"GO_WASM_CHILD=replaced"}
+	cmd.Stdin = bytes.NewReader(nil)
+	output, err = cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "grandchild:replaced\n"; string(output) != want {
+		t.Fatalf("grandchild output = %q, want %q", output, want)
+	}
+
+	missing := exec.Command("/does-not-exist")
+	missing.Stdin = bytes.NewReader(nil)
+	missing.Stdout = io.Discard
+	missing.Stderr = io.Discard
+	if err := missing.Run(); !os.IsNotExist(err) {
+		t.Fatalf("missing executable returned %v", err)
+	}
+
+	_, err = syscall.ForkExec("/child", []string{"/child"}, &syscall.ProcAttr{
+		Sys: &syscall.SysProcAttr{Setsid: true},
+	})
+	if err == nil || !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("unsupported SysProcAttr returned %v", err)
+	}
 }
 
 func TestMain(m *testing.M) {

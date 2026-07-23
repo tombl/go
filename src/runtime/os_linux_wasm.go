@@ -35,6 +35,8 @@ const (
 	_SYS_CLOCK_GETTIME64        = 403
 	_SYS_SCHED_YIELD            = 124
 	_SYS_SCHED_GETAFFINITY      = 123
+	_SYS_RT_SIGACTION           = 134
+	_SYS_RT_SIGPROCMASK         = 135
 	_SYS_CLONE                  = 220
 	_SYS_GETRANDOM              = 278
 
@@ -44,7 +46,17 @@ const (
 	_CLOCK_REALTIME  = 0
 	_CLOCK_MONOTONIC = 1
 
+	_SIGPIPE = 13
 	_SIGSEGV = 11
+
+	_SIG_BLOCK   = 0
+	_SIG_UNBLOCK = 1
+	_SIG_SETMASK = 2
+
+	_SA_SIGINFO  = 0x00000004
+	_SA_RESTORER = 0x04000000
+	_SA_ONSTACK  = 0x08000000
+	_SA_RESTART  = 0x10000000
 
 	_CLONE_VM      = 0x00000100
 	_CLONE_FS      = 0x00000200
@@ -72,6 +84,11 @@ func wasmGetArgsLength() int32
 
 //go:wasmimport linux get_args
 func wasmGetArgs(buf unsafe.Pointer) int32
+
+//go:wasmimport linux copy_siginfo
+//go:nosplit
+//go:noescape
+func wasmCopySiginfo(buf unsafe.Pointer) int32
 
 func osinit() {
 	physPageSize = 64 * 1024
@@ -133,7 +150,21 @@ func osyield_no_g() {
 	linuxsys.Syscall6(_SYS_SCHED_YIELD, 0, 0, 0, 0, 0, 0)
 }
 
-type sigset struct{}
+type sigset [2]uint32
+
+var sigset_all = sigset{^uint32(0), ^uint32(0)}
+
+type sigactiont struct {
+	sa_handler  uint32
+	sa_flags    uint32
+	sa_restorer uint32
+	sa_mask     sigset
+}
+
+var (
+	fwdSig      [_NSIG]uintptr
+	handlingSig [_NSIG]uint32
+)
 
 func mpreinit(mp *m) {
 	mp.gsignal = malg(32 * 1024)
@@ -144,17 +175,29 @@ func mpreinit(mp *m) {
 func usleep_no_g(usec uint32) { usleep(usec) }
 
 //go:nosplit
-func sigsave(*sigset) {}
+func sigsave(mask *sigset) {
+	rtsigprocmask(_SIG_SETMASK, nil, mask)
+}
 
 //go:nosplit
-func msigrestore(sigset) {}
+func msigrestore(mask sigset) {
+	rtsigprocmask(_SIG_SETMASK, &mask, nil)
+}
 
 //go:nosplit
 //go:nowritebarrierrec
-func clearSignalHandlers() {}
+func clearSignalHandlers() {
+	for sig := uint32(0); sig < _NSIG; sig++ {
+		if atomic.Load(&handlingSig[sig]) != 0 {
+			setsig(sig, 0)
+		}
+	}
+}
 
 //go:nosplit
-func sigblock(bool) {}
+func sigblock(exiting bool) {
+	rtsigprocmask(_SIG_SETMASK, &sigset_all, nil)
+}
 
 func minit()                {}
 func unminit()              {}
@@ -162,11 +205,21 @@ func mdestroy(mp *m)        {}
 func initsig(bool)          {}
 func signame(uint32) string { return "" }
 
-const _NSIG = 0
+const _NSIG = 65
 
 func crash() { abort() }
 
 func wasmMstart()
+func wasmSigtramp()
+
+//go:nosplit
+func wasmSignalHandler(sig uint32) {
+	var info [128]byte
+	if wasmCopySiginfo(unsafe.Pointer(&info[0])) != 0 {
+		return
+	}
+	sigsend(sig)
+}
 
 //go:nowritebarrierrec
 func newosproc(mp *m) {
@@ -198,7 +251,11 @@ func newosproc0(stacksize uintptr, fn unsafe.Pointer) {
 }
 
 //go:linkname os_sigpipe os.sigpipe
-func os_sigpipe() {}
+func os_sigpipe() {
+	if !signal_ignored(_SIGPIPE) && !sigsend(_SIGPIPE) {
+		exit(2)
+	}
+}
 
 //go:linkname syscall_now syscall.now
 func syscall_now() (sec int64, nsec int32) {
@@ -219,9 +276,72 @@ func getfp() uintptr { return 0 }
 
 func setProcessCPUProfiler(int32) {}
 func setThreadCPUProfiler(int32)  {}
-func sigdisable(uint32)           {}
-func sigenable(uint32)            {}
-func sigignore(uint32)            {}
+func sigdisable(sig uint32) {
+	if sig >= _NSIG {
+		return
+	}
+	atomic.Store(&handlingSig[sig], 0)
+	setsig(sig, atomic.Loaduintptr(&fwdSig[sig]))
+}
+func sigenable(sig uint32) {
+	if sig >= _NSIG {
+		return
+	}
+	if atomic.Cas(&handlingSig[sig], 0, 1) {
+		atomic.Storeuintptr(&fwdSig[sig], getsig(sig))
+		setsig(sig, abi.FuncPCABI0(wasmSigtramp))
+	}
+}
+func sigignore(sig uint32) {
+	if sig >= _NSIG {
+		return
+	}
+	atomic.Store(&handlingSig[sig], 0)
+	setsig(sig, 1)
+}
+
+//go:nosplit
+func getsig(sig uint32) uintptr {
+	var sa sigactiont
+	if errno := rtSigaction(sig, nil, &sa); errno != 0 {
+		throw("sigaction read failed")
+	}
+	if sa.sa_handler <= 1 {
+		return uintptr(sa.sa_handler)
+	}
+	return uintptr(sa.sa_handler) << 16
+}
+
+//go:nosplit
+func setsig(sig uint32, handler uintptr) {
+	var sa sigactiont
+	if handler <= 1 {
+		sa.sa_handler = uint32(handler)
+	} else {
+		fn := uint32(handler >> 16)
+		sa.sa_handler = fn
+		sa.sa_restorer = fn
+		sa.sa_flags = _SA_SIGINFO | _SA_RESTORER | _SA_ONSTACK | _SA_RESTART
+		sa.sa_mask = sigset_all
+	}
+	if errno := rtSigaction(sig, &sa, nil); errno != 0 {
+		throw("sigaction failed")
+	}
+}
+
+//go:nosplit
+func rtsigprocmask(how int32, new, old *sigset) {
+	_, _, errno := linuxsys.Syscall6(_SYS_RT_SIGPROCMASK, uintptr(how), uintptr(unsafe.Pointer(new)), uintptr(unsafe.Pointer(old)), unsafe.Sizeof(sigset{}), 0, 0)
+	if errno != 0 {
+		throw("sigprocmask failed")
+	}
+}
+
+//go:nosplit
+func rtSigaction(sig uint32, new, old *sigactiont) uintptr {
+	_, _, errno := linuxsys.Syscall6(_SYS_RT_SIGACTION, uintptr(sig), uintptr(unsafe.Pointer(new)), uintptr(unsafe.Pointer(old)), unsafe.Sizeof(sigset{}), 0, 0)
+	return errno
+}
 
 //go:nosplit
 func rawResult(r1, errno uintptr) int32 {

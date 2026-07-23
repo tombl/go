@@ -136,6 +136,9 @@ func runtime_AfterForkInChild()
 //
 //go:norace
 func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid int, err Errno) {
+	if runtime.GOARCH == "wasm" {
+		return wasmForkAndExec(argv0, argv, envv, chroot, dir, attr, sys, pipe)
+	}
 	// Set up and fork. This returns immediately in the parent or
 	// if there's an error.
 	upid, pidfd, err, mapPipe, locked := forkAndExecInChild1(argv0, argv, envv, chroot, dir, attr, sys, pipe)

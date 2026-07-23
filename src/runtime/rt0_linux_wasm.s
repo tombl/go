@@ -37,3 +37,48 @@ TEXT runtime·wasmMstart(SB),NOSPLIT,$0
 	Drop
 	Call wasm_pc_f_loop(SB)
 	Return
+
+// wasmSigtramp is called synchronously by the kernel while a syscall import is
+// suspended. The instance globals still contain the interrupted M's SP and g.
+// Its WebAssembly parameters are R0 (the registered handler) and R1 (signal).
+TEXT runtime·wasmSigtramp(SB),NOSPLIT,$0
+	Get SP
+	I64ExtendI32U
+	Set R2
+	Get g
+	Set R3
+
+	MOVD g_m(R3), R4
+	MOVD m_gsignal(R4), R5
+	MOVD (g_stack+stack_hi)(R5), R6
+	Get R6
+	I64Const $16
+	I64Sub
+	I32WrapI64
+	Set SP
+	Get R5
+	Set g
+
+	Get SP
+	I32Const $16
+	I32Sub
+	Set SP
+
+	Get SP
+	I64Const $0 // top-level return PC
+	I64Store $0
+	Get SP
+	Get R1
+	I64ExtendI32U
+	I64Store $8
+
+	I32Const $0
+	Call runtime·wasmSignalHandler(SB)
+	Drop
+
+	Get R2
+	I32WrapI64
+	Set SP
+	Get R3
+	Set g
+	Return
