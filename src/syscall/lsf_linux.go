@@ -76,7 +76,7 @@ func AttachLsf(fd int, i []SockFilter) error {
 	var p SockFprog
 	p.Len = uint16(len(i))
 	p.Filter = (*SockFilter)(unsafe.Pointer(&i[0]))
-	return setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, unsafe.Pointer(&p), unsafe.Sizeof(p))
+	return setsockoptSockFprog(fd, &p)
 }
 
 // Deprecated: Use golang.org/x/net/bpf instead.
