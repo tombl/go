@@ -5,6 +5,8 @@
 // TODO(neelance): implement with actual atomic operations as soon as threads are available
 // See https://github.com/WebAssembly/design/issues/1073
 
+//go:build !linux
+
 package atomic
 
 import "unsafe"
