@@ -114,23 +114,30 @@ func rconv(r int) string {
 }
 
 var unaryDst = map[obj.As]bool{
-	ASet:          true,
-	ATee:          true,
-	ACall:         true,
-	ACallIndirect: true,
-	ABr:           true,
-	ABrIf:         true,
-	ABrTable:      true,
-	AI32Store:     true,
-	AI64Store:     true,
-	AF32Store:     true,
-	AF64Store:     true,
-	AI32Store8:    true,
-	AI32Store16:   true,
-	AI64Store8:    true,
-	AI64Store16:   true,
-	AI64Store32:   true,
-	ACALLNORESUME: true,
+	ASet:              true,
+	ATee:              true,
+	ACall:             true,
+	ACallIndirect:     true,
+	ABr:               true,
+	ABrIf:             true,
+	ABrTable:          true,
+	AI32Store:         true,
+	AI64Store:         true,
+	AF32Store:         true,
+	AF64Store:         true,
+	AI32Store8:        true,
+	AI32Store16:       true,
+	AI64Store8:        true,
+	AI64Store16:       true,
+	AI64Store32:       true,
+	AI32StoreAtomic:   true,
+	AI64StoreAtomic:   true,
+	AI32StoreAtomic8:  true,
+	AI32StoreAtomic16: true,
+	AI64StoreAtomic8:  true,
+	AI64StoreAtomic16: true,
+	AI64StoreAtomic32: true,
+	ACALLNORESUME:     true,
 }
 
 var Linkwasm = obj.LinkArch{
@@ -602,7 +609,9 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			}
 
 		case AI32Load, AI64Load, AF32Load, AF64Load, AI32Load8S, AI32Load8U, AI32Load16S, AI32Load16U,
-			AI64Load8S, AI64Load8U, AI64Load16S, AI64Load16U, AI64Load32S, AI64Load32U, AV128Load:
+			AI64Load8S, AI64Load8U, AI64Load16S, AI64Load16U, AI64Load32S, AI64Load32U, AV128Load,
+			AI32LoadAtomic, AI64LoadAtomic, AI32LoadAtomic8U, AI32LoadAtomic16U,
+			AI64LoadAtomic8U, AI64LoadAtomic16U, AI64LoadAtomic32U:
 			if p.From.Type == obj.TYPE_MEM {
 				as := p.As
 				from := p.From
@@ -1045,6 +1054,7 @@ var notUsePC_B = map[string]bool{
 	"wasm_export_run":         true,
 	"wasm_export_resume":      true,
 	"wasm_export_getsp":       true,
+	"runtime.wasmMstart":      true,
 	"wasm_pc_f_loop":          true,
 	"wasm_pc_f_loop_export":   true,
 	"gcWriteBarrier":          true,
@@ -1102,6 +1112,9 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		"wasm_export_run", "wasm_export_resume", "wasm_export_getsp",
 		"wasm_pc_f_loop", "runtime.wasmDiv", "runtime.wasmTruncS", "runtime.wasmTruncU", "memeqbody":
 		varDecls = []*varDecl{}
+		useAssemblyRegMap()
+	case "runtime.wasmMstart":
+		varDecls = []*varDecl{{count: 3, typ: i64}}
 		useAssemblyRegMap()
 	case "wasm_pc_f_loop_export":
 		varDecls = []*varDecl{{count: 2, typ: i32}}
@@ -1368,7 +1381,17 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			w.Write(b)
 
 		case AI32Load, AI64Load, AF32Load, AF64Load, AI32Load8S, AI32Load8U, AI32Load16S, AI32Load16U,
-			AI64Load8S, AI64Load8U, AI64Load16S, AI64Load16U, AI64Load32S, AI64Load32U, AV128Load:
+			AI64Load8S, AI64Load8U, AI64Load16S, AI64Load16U, AI64Load32S, AI64Load32U, AV128Load,
+			AAtomicNotify, AAtomicWait32, AAtomicWait64,
+			AI32LoadAtomic, AI64LoadAtomic, AI32LoadAtomic8U, AI32LoadAtomic16U,
+			AI64LoadAtomic8U, AI64LoadAtomic16U, AI64LoadAtomic32U,
+			AI32AddRmw, AI64AddRmw, AI32AddRmw8U, AI32AddRmw16U, AI64AddRmw8U, AI64AddRmw16U, AI64AddRmw32U,
+			AI32SubRmw, AI64SubRmw, AI32SubRmw8U, AI32SubRmw16U, AI64SubRmw8U, AI64SubRmw16U, AI64SubRmw32U,
+			AI32AndRmw, AI64AndRmw, AI32AndRmw8U, AI32AndRmw16U, AI64AndRmw8U, AI64AndRmw16U, AI64AndRmw32U,
+			AI32OrRmw, AI64OrRmw, AI32OrRmw8U, AI32OrRmw16U, AI64OrRmw8U, AI64OrRmw16U, AI64OrRmw32U,
+			AI32XorRmw, AI64XorRmw, AI32XorRmw8U, AI32XorRmw16U, AI64XorRmw8U, AI64XorRmw16U, AI64XorRmw32U,
+			AI32Xchg, AI64Xchg, AI32Xchg8U, AI32Xchg16U, AI64Xchg8U, AI64Xchg16U, AI64Xchg32U,
+			AI32Cmpxchg, AI64Cmpxchg, AI32Cmpxchg8U, AI32Cmpxchg16U, AI64Cmpxchg8U, AI64Cmpxchg16U, AI64Cmpxchg32U:
 			if p.From.Offset < 0 {
 				panic("negative offset for *Load")
 			}
@@ -1381,7 +1404,9 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			writeUleb128(w, align(p.As))
 			writeUleb128(w, uint64(p.From.Offset))
 
-		case AI32Store, AI64Store, AF32Store, AF64Store, AI32Store8, AI32Store16, AI64Store8, AI64Store16, AI64Store32, AV128Store:
+		case AI32Store, AI64Store, AF32Store, AF64Store, AI32Store8, AI32Store16, AI64Store8, AI64Store16, AI64Store32, AV128Store,
+			AI32StoreAtomic, AI64StoreAtomic, AI32StoreAtomic8, AI32StoreAtomic16,
+			AI64StoreAtomic8, AI64StoreAtomic16, AI64StoreAtomic32:
 			if p.To.Offset < 0 {
 				panic("negative offset")
 			}
@@ -1392,6 +1417,9 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			writeUleb128(w, uint64(p.To.Offset))
 
 		case ACurrentMemory, AGrowMemory, AMemoryFill:
+			w.WriteByte(0x00)
+
+		case AAtomicFence:
 			w.WriteByte(0x00)
 
 		case AMemoryCopy:
@@ -1441,6 +1469,12 @@ func writeOpcode(w *bytes.Buffer, as obj.As) {
 		w.WriteByte(0xFD)
 		writeUleb128(w, uint64(as-AI8x16RelaxedSwizzle+0x80))
 		w.WriteByte(0x02)
+	case as <= AAtomicFence:
+		w.WriteByte(0xFE)
+		writeUleb128(w, uint64(as-AAtomicNotify))
+	case as <= AI64Cmpxchg32U:
+		w.WriteByte(0xFE)
+		writeUleb128(w, uint64(as-AI32LoadAtomic+0x10))
 
 	default:
 		panic(fmt.Sprintf("unexpected assembler op: %s", as))
@@ -1486,6 +1520,25 @@ func align(as obj.As) uint64 {
 		return 3
 	case AV128Load, AV128Store:
 		return 0 // TODO do we want more alignment
+	case AI32LoadAtomic8U, AI64LoadAtomic8U, AI32StoreAtomic8, AI64StoreAtomic8,
+		AI32AddRmw8U, AI64AddRmw8U, AI32SubRmw8U, AI64SubRmw8U,
+		AI32AndRmw8U, AI64AndRmw8U, AI32OrRmw8U, AI64OrRmw8U,
+		AI32XorRmw8U, AI64XorRmw8U, AI32Xchg8U, AI64Xchg8U,
+		AI32Cmpxchg8U, AI64Cmpxchg8U:
+		return 0
+	case AI32LoadAtomic16U, AI64LoadAtomic16U, AI32StoreAtomic16, AI64StoreAtomic16,
+		AI32AddRmw16U, AI64AddRmw16U, AI32SubRmw16U, AI64SubRmw16U,
+		AI32AndRmw16U, AI64AndRmw16U, AI32OrRmw16U, AI64OrRmw16U,
+		AI32XorRmw16U, AI64XorRmw16U, AI32Xchg16U, AI64Xchg16U,
+		AI32Cmpxchg16U, AI64Cmpxchg16U:
+		return 1
+	case AAtomicNotify, AAtomicWait32, AI32LoadAtomic, AI32StoreAtomic, AI64LoadAtomic32U, AI64StoreAtomic32,
+		AI32AddRmw, AI32SubRmw, AI32AndRmw, AI32OrRmw, AI32XorRmw, AI32Xchg, AI32Cmpxchg,
+		AI64AddRmw32U, AI64SubRmw32U, AI64AndRmw32U, AI64OrRmw32U, AI64XorRmw32U, AI64Xchg32U, AI64Cmpxchg32U:
+		return 2
+	case AAtomicWait64, AI64LoadAtomic, AI64StoreAtomic,
+		AI64AddRmw, AI64SubRmw, AI64AndRmw, AI64OrRmw, AI64XorRmw, AI64Xchg, AI64Cmpxchg:
+		return 3
 	default:
 		panic("align: bad op")
 	}

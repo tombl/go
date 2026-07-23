@@ -112,7 +112,7 @@ typedef struct {} ptracePer;
 // The real epoll_event is a union, and godefs doesn't handle it well.
 struct my_epoll_event {
 	uint32_t events;
-#if defined(__ARM_EABI__) || defined(__aarch64__) || (defined(__mips__) && _MIPS_SIM == _ABIO32)
+#if defined(__ARM_EABI__) || defined(__aarch64__) || defined(__wasm__) || (defined(__mips__) && _MIPS_SIM == _ABIO32)
 	// padding is not specified in linux/eventpoll.h but added to conform to the
 	// alignment requirements of EABI
 	int32_t padFd;
@@ -128,8 +128,13 @@ struct my_epoll_event {
 // ustat is deprecated and glibc 2.28 removed ustat.h. Provide the type here for
 // backwards compatibility. Copied from /usr/include/bits/ustat.h
 struct ustat {
+#ifdef __wasm__
+	int32_t f_tfree;
+	ino_t f_tinode;
+#else
 	__daddr_t f_tfree;
 	__ino_t f_tinode;
+#endif
 	char f_fname[6];
 	char f_fpack[6];
 };

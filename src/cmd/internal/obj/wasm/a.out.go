@@ -525,6 +525,77 @@ const (
 	AI16x8RelaxedDotI8x16I7x16S
 	AI32x4RelaxedDotI8x16I7x16AddS
 
+	// WebAssembly threads instructions 0xFE 0x00 and following.
+	AAtomicNotify
+	AAtomicWait32
+	AAtomicWait64
+	AAtomicFence
+
+	AI32LoadAtomic // opcode 0xFE 0x10
+	AI64LoadAtomic
+	AI32LoadAtomic8U
+	AI32LoadAtomic16U
+	AI64LoadAtomic8U
+	AI64LoadAtomic16U
+	AI64LoadAtomic32U
+	AI32StoreAtomic
+	AI64StoreAtomic
+	AI32StoreAtomic8
+	AI32StoreAtomic16
+	AI64StoreAtomic8
+	AI64StoreAtomic16
+	AI64StoreAtomic32
+
+	AI32AddRmw
+	AI64AddRmw
+	AI32AddRmw8U
+	AI32AddRmw16U
+	AI64AddRmw8U
+	AI64AddRmw16U
+	AI64AddRmw32U
+	AI32SubRmw
+	AI64SubRmw
+	AI32SubRmw8U
+	AI32SubRmw16U
+	AI64SubRmw8U
+	AI64SubRmw16U
+	AI64SubRmw32U
+	AI32AndRmw
+	AI64AndRmw
+	AI32AndRmw8U
+	AI32AndRmw16U
+	AI64AndRmw8U
+	AI64AndRmw16U
+	AI64AndRmw32U
+	AI32OrRmw
+	AI64OrRmw
+	AI32OrRmw8U
+	AI32OrRmw16U
+	AI64OrRmw8U
+	AI64OrRmw16U
+	AI64OrRmw32U
+	AI32XorRmw
+	AI64XorRmw
+	AI32XorRmw8U
+	AI32XorRmw16U
+	AI64XorRmw8U
+	AI64XorRmw16U
+	AI64XorRmw32U
+	AI32Xchg
+	AI64Xchg
+	AI32Xchg8U
+	AI32Xchg16U
+	AI64Xchg8U
+	AI64Xchg16U
+	AI64Xchg32U
+	AI32Cmpxchg
+	AI64Cmpxchg
+	AI32Cmpxchg8U
+	AI32Cmpxchg16U
+	AI64Cmpxchg8U
+	AI64Cmpxchg16U
+	AI64Cmpxchg32U
+
 	ALast // Sentinel: End of low-level WebAssembly instructions.
 
 	ARESUMEPOINT

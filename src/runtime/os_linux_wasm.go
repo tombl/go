@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"internal/runtime/atomic"
 	linuxsys "internal/runtime/syscall/linux"
 	"unsafe"
@@ -33,6 +34,8 @@ const (
 	_SYS_CLOCK_NANOSLEEP_TIME64 = 407
 	_SYS_CLOCK_GETTIME64        = 403
 	_SYS_SCHED_YIELD            = 124
+	_SYS_SCHED_GETAFFINITY      = 123
+	_SYS_CLONE                  = 220
 	_SYS_GETRANDOM              = 278
 
 	_FUTEX_WAIT_PRIVATE = 128
@@ -42,6 +45,13 @@ const (
 	_CLOCK_MONOTONIC = 1
 
 	_SIGSEGV = 11
+
+	_CLONE_VM      = 0x00000100
+	_CLONE_FS      = 0x00000200
+	_CLONE_FILES   = 0x00000400
+	_CLONE_SIGHAND = 0x00000800
+	_CLONE_THREAD  = 0x00010000
+	_CLONE_SYSVSEM = 0x00040000
 )
 
 type timespec64 struct {
@@ -71,7 +81,24 @@ func osinit() {
 	getg().m.procid = 2
 }
 
-func getCPUCount() int32 { return 1 }
+func getCPUCount() int32 {
+	var mask [128]byte
+	n, _, errno := linuxsys.Syscall6(_SYS_SCHED_GETAFFINITY, 0, uintptr(len(mask)), uintptr(unsafe.Pointer(&mask[0])), 0, 0, 0)
+	if errno != 0 || n == 0 || n > uintptr(len(mask)) {
+		return 1
+	}
+	count := int32(0)
+	for _, b := range mask[:n] {
+		for b != 0 {
+			count += int32(b & 1)
+			b >>= 1
+		}
+	}
+	if count == 0 {
+		return 1
+	}
+	return count
+}
 
 func resetMemoryDataView() {}
 
@@ -139,9 +166,23 @@ const _NSIG = 0
 
 func crash() { abort() }
 
-//go:nowritebarrier
+func wasmMstart()
+
+//go:nowritebarrierrec
 func newosproc(mp *m) {
-	throw("newosproc: not implemented")
+	const flags = _CLONE_VM | _CLONE_FS | _CLONE_FILES | _CLONE_SIGHAND | _CLONE_THREAD | _CLONE_SYSVSEM
+	fn := uintptr(abi.FuncPCABI0(wasmMstart)) >> 16
+	for tries := 0; ; tries++ {
+		_, _, errno := linuxsys.Syscall6(_SYS_CLONE, fn, uintptr(unsafe.Pointer(mp)), flags, 0, 0, 0)
+		if errno == 0 {
+			return
+		}
+		if errno != _EAGAIN || tries == 20 {
+			print("runtime: failed to create new OS thread (have ", mcount(), " already; errno=", errno, ")\n")
+			throw("newosproc")
+		}
+		usleep_no_g(1000)
+	}
 }
 
 //go:nosplit

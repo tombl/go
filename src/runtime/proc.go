@@ -2949,7 +2949,7 @@ func newm1(mp *m) {
 //
 // The calling thread must itself be in a known-good state.
 func startTemplateThread() {
-	if GOARCH == "wasm" { // no threads on wasm yet
+	if GOARCH == "wasm" && GOOS != "linux" {
 		return
 	}
 
@@ -4554,7 +4554,7 @@ func gdestroy(gp *g) {
 
 	dropg()
 
-	if GOARCH == "wasm" { // no threads yet on wasm
+	if GOARCH == "wasm" && GOOS != "linux" {
 		gfput(pp, gp)
 		return
 	}
@@ -5648,7 +5648,7 @@ func Breakpoint() {
 //
 //go:nosplit
 func dolockOSThread() {
-	if GOARCH == "wasm" {
+	if GOARCH == "wasm" && GOOS != "linux" {
 		return // no threads on wasm yet
 	}
 	gp := getg()
@@ -5700,7 +5700,7 @@ func lockOSThread() {
 //
 //go:nosplit
 func dounlockOSThread() {
-	if GOARCH == "wasm" {
+	if GOARCH == "wasm" && GOOS != "linux" {
 		return // no threads on wasm yet
 	}
 	gp := getg()
@@ -6528,9 +6528,7 @@ func checkdead() {
 var forcegcperiod int64 = 2 * 60 * 1e9
 
 // haveSysmon indicates whether there is sysmon thread support.
-//
-// No threads on wasm yet, so no sysmon.
-const haveSysmon = GOARCH != "wasm"
+const haveSysmon = GOARCH != "wasm" || GOOS == "linux"
 
 // Always runs without a P, so write barriers are not allowed.
 //
