@@ -22,12 +22,6 @@ TEXT runtime·wasmDiv(SB), NOSPLIT, $0-0
 	I64DivS
 	Return
 
-TEXT runtime·exitThread(SB), NOSPLIT, $0-0
-	UNDEF
-
-TEXT runtime·osyield(SB), NOSPLIT, $0-0
-	UNDEF
-
 TEXT runtime·currentMemory(SB), NOSPLIT, $0
 	Get SP
 	CurrentMemory
