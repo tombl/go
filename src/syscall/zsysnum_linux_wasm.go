@@ -251,6 +251,8 @@ const (
 	SYS_ACCEPT4                      = 242
 	SYS_RECVMMSG                     = 243
 	SYS_ARCH_SPECIFIC_SYSCALL        = 244
+	SYS_SET_THREAD_AREA              = 244
+	SYS_WASM_GET_ARGS                = 245
 	SYS_WAIT4                        = 260
 	SYS_PRLIMIT64                    = 261
 	SYS_FANOTIFY_INIT                = 262
