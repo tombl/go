@@ -18,6 +18,7 @@ const (
 	SYS_PREAD64       = 67
 	SYS_READ          = 63
 	SYS_UNAME         = 160
+	SYS_WASM_GET_ARGS = 245
 
 	EFD_NONBLOCK = 0x800
 

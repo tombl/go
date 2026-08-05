@@ -79,12 +79,6 @@ var (
 	secureMode   bool
 )
 
-//go:wasmimport linux get_args_length
-func wasmGetArgsLength() int32
-
-//go:wasmimport linux get_args
-func wasmGetArgs(buf unsafe.Pointer) int32
-
 //go:wasmimport linux copy_siginfo
 //go:nosplit
 //go:noescape
@@ -465,13 +459,14 @@ func wasmArgsWord(base unsafe.Pointer, off uintptr) uint32 {
 //
 //go:nosplit
 func sysargs(_ int32, _ **byte) {
-	n := wasmGetArgsLength()
-	if n < 20 || n > int32(len(wasmArgsBlob)) {
-		throw("invalid process argument blob")
-	}
 	base := unsafe.Pointer(&wasmArgsBlob[0])
-	if wasmGetArgs(base) != 0 {
-		throw("get_args failed")
+	_, _, errno := linuxsys.Syscall6(linuxsys.SYS_WASM_GET_ARGS, uintptr(base), uintptr(len(wasmArgsBlob)), 0, 0, 0, 0)
+	if errno != 0 {
+		throw("wasm_get_args failed")
+	}
+	n := uint64(wasmArgsWord(base, 0)) + 20
+	if n > uint64(len(wasmArgsBlob)) {
+		throw("invalid process argument blob")
 	}
 
 	envc := wasmArgsWord(base, 4)
@@ -500,7 +495,7 @@ func sysargs(_ int32, _ **byte) {
 	auxoff := uintptr(envp32-base32) + uintptr(envc+1)*4
 	auxstart := pos
 	for {
-		if pos+2 > uint32(len(out)) || auxoff+8 > uintptr(n) {
+		if pos+2 > uint32(len(out)) || uint64(auxoff)+8 > n {
 			throw("invalid process auxiliary vector")
 		}
 		tag := wasmArgsWord(base, auxoff)
