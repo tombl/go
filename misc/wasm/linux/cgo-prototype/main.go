@@ -32,6 +32,7 @@ uint64_t prototype_pair_sum(prototype_pair pair);
 uint32_t prototype_buffer_sum(prototype_buffer buffer);
 prototype_buffer prototype_make_buffer(uint32_t *data, uint32_t length);
 uint32_t prototype_pointer_table_sum(prototype_pointer_table table);
+uint32_t prototype_increment(uint32_t value);
 prototype_transform prototype_get_transform(void);
 uint32_t prototype_apply(prototype_transform transform, uint32_t value);
 uint32_t prototype_set_errno(uint32_t value);
@@ -141,6 +142,9 @@ func main() {
 	transform := C.prototype_get_transform()
 	if transform == nil || uint32(C.prototype_apply(transform, 41)) != 42 {
 		panic("function pointer")
+	}
+	if got := uint32(C.prototype_apply(C.prototype_increment, 41)); got != 42 {
+		panic("named C function pointer")
 	}
 	if got, err := C.prototype_set_errno(123); uint32(got) != 7 || err != syscall.Errno(123) {
 		panic(err)

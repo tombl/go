@@ -98,13 +98,18 @@ the 64-bit Go pointer ABI and wasm32 C pointers. Calls switch to g0; callbacks
 from both Go-created and C-created pthreads attach to the scheduler and may
 grow/copy Go stacks.
 
-The focused integration program covers pointer-bearing structs and arrays,
-aggregate results, function pointers, errno, libc allocation, callbacks,
-pthread teardown, GC, and SMP execution on 1-, 2-, and 4-CPU guests. Remaining
-work is ecosystem and unusual-ABI validation (notably packed/bitfield
-aggregates, pointer-bearing unions, and C++ unwinding), before static cgo can be
-called broadly production-ready. Dynamic loading remains a separate and
-unsupported platform feature.
+The focused integration program covers pointer-bearing aggregate values,
+aggregate results, returned and Go-selected C function pointers, errno, libc
+allocation, callbacks, pthread teardown, GC, and SMP execution on 1-, 2-, and
+4-CPU guests. The distro additionally compiles and runs a real SQLite cgo
+dependency. SQLite exposes the one structural mixed-width caveat: an
+unknown-length array behind a bare pointer cannot be automatically repacked
+when its element layout differs, so that API needs a count/accessor wrapper or
+compact `uintptr_t` transport fields. Remaining work is ecosystem and
+unusual-ABI validation (notably packed/bitfield aggregates, pointer-bearing
+unions, and C++ unwinding), before static cgo can be called broadly
+production-ready. Dynamic loading remains a separate and unsupported platform
+feature.
 
 The current implementation checkpoint and validated VM probe are documented in
 `cgo-prototype/DESIGN.md`.

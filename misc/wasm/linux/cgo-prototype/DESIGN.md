@@ -62,11 +62,20 @@ high bits. `unsafe.Pointer` and integer conversions can manufacture an invalid
 The check is an ABI safety invariant, not an allocator fast-path check.
 
 Aggregate field translation stays in generated C/Go wrappers. Pointer-bearing
-structs and arrays use a natural 64-bit-pointer Go layout and are marshalled
-field by field to the compact C layout. Function-pointer typedefs retain their
-C spelling at the narrowing boundary. WebAssembly's strict function types mean
-that no generic variadic or untyped trampoline can substitute for these
-generated adapters.
+struct and array values use a natural 64-bit-pointer Go layout and are
+marshalled field by field to the compact C layout. A bare pointer to an array
+of mixed-layout aggregates is different: C supplies no length from which a
+wrapper could infer and repack the pointee range. Such an API needs an explicit
+count/accessor bridge, or a compact transport structure containing `uintptr_t`
+values. This is an inherent API-boundary requirement rather than a linker or
+kernel defect.
+
+Function-pointer typedefs retain their C spelling at the narrowing boundary.
+Taking a named C function in a Go expression is implemented through a native
+32-bit function-pointer data cell with a table-index relocation; it must not
+use the Go function address, which is the distinct continuation value
+`PC_F<<16`. WebAssembly's strict function types mean that no generic variadic
+or untyped trampoline can substitute for these generated adapters.
 
 All functions passed to `runtime.asmcgocall` use the exact WebAssembly type
 `int32(void*)`. Ordinary cgo and runtime/cgo wrappers return zero; errno
@@ -102,15 +111,22 @@ The linker relocation/TLS/constructor path, musl startup handoff,
 native-signature calls, callback/crosscall path, libc-backed heap regions, and
 mixed-pointer-width generator are implemented. The integration test covers
 scalars, direct and allocated pointers, strings/slices, pointer-bearing
-aggregates and arrays, aggregate results, function pointers, errno, stack
-growth, scheduled callbacks, destructor cleanup, and concurrent pthread cases.
-It passes feature-enabled validation and 1-, 2-, and 4-CPU distro guests.
+aggregate values, aggregate results, returned and Go-selected C function
+pointers, errno, stack growth, scheduled callbacks, destructor cleanup, and
+concurrent pthread cases. It passes feature-enabled validation and 1-, 2-, and
+4-CPU distro guests.
 
-The remaining work is validation breadth rather than a known kernel contract
-change: run the standard library and the distro's Unix-oriented ecosystem
-matrix unchanged, classify packages that assume fork/dlopen/PIE, add real cgo
-dependencies beyond the focused probe, and turn any newly observed relocation
-or ABI shape into a minimized regression test. C++ exceptions, `setjmp`/
+The distro's Unix-oriented pure-Go matrix and a patched `mattn/go-sqlite3`
+build provide the first ecosystem layer. SQLite needs only platform feature
+flags for mmap/WAL and an explicit compact `uintptr_t` result-array transport
+at the mixed-layout boundary described above. Its ordinary SQL, backup,
+transaction, concurrency, and callback tests exercise the real static-cgo
+path.
+
+The remaining work is further validation breadth rather than a known kernel
+contract change: classify more packages that assume fork/dlopen/PIE and turn
+each newly observed relocation or ABI shape into a minimized regression test.
+C++ exceptions, `setjmp`/
 `longjmp` across Go frames, pointer-bearing unions, and packed/bitfield
 aggregates remain explicit audit cases; they must either be translated safely
 or rejected clearly rather than silently mislaid out.
