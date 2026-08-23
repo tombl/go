@@ -23,6 +23,18 @@ _cgo_set_stacklo(G *g)
 
 	x_cgo_getstackbound(bounds);
 
+	#ifdef __wasm__
+	/* Go keeps 64-bit pointers on linux/wasm while libc is memory32. G in
+	 * libcgo.h describes the native layout used by conventional targets, so
+	 * translate the two leading Go stack fields explicitly here. */
+	((uint64 *)g)[0] = bounds[0];
+	if (((uint64 *)g)[0] >= ((uint64 *)g)[1]) {
+		fprintf(stderr, "runtime/cgo: bad stack bounds: lo=%p hi=%p\n",
+			(void*)(uintptr)((uint64 *)g)[0],
+			(void*)(uintptr)((uint64 *)g)[1]);
+		abort();
+	}
+	#else
 	g->stacklo = bounds[0];
 
 	// Sanity check the results now, rather than getting a
@@ -31,6 +43,7 @@ _cgo_set_stacklo(G *g)
 		fprintf(stderr, "runtime/cgo: bad stack bounds: lo=%p hi=%p\n", (void*)(g->stacklo), (void*)(g->stackhi));
 		abort();
 	}
+	#endif
 }
 
 void

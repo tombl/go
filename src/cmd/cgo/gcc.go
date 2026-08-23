@@ -231,7 +231,7 @@ func (f *File) loadDebug(p *Package) {
 // Preconditions: File.loadDebug must be called prior to translate.
 func (p *Package) Translate(f *File) {
 	var conv typeConv
-	conv.Init(p.PtrSize, p.IntSize)
+	conv.Init(p.PtrSize, p.CPtrSize, p.IntSize)
 	for _, d := range f.debugs {
 		p.recordTypes(f, d, &conv)
 	}
@@ -2336,8 +2336,9 @@ type typeConv struct {
 	goVoid                                 ast.Expr // _Ctype_void, denotes C's void
 	goVoidPtr                              ast.Expr // unsafe.Pointer or *byte
 
-	ptrSize int64
-	intSize int64
+	ptrSize  int64 // Go pointer size
+	cPtrSize int64 // C pointer size
+	intSize  int64
 }
 
 var tagGen int
@@ -2352,8 +2353,9 @@ var unionWithPointer = make(map[ast.Expr]bool)
 // The same dwarf.StructType pointer will always get the same tag.
 var anonymousStructTag = make(map[*dwarf.StructType]string)
 
-func (c *typeConv) Init(ptrSize, intSize int64) {
+func (c *typeConv) Init(ptrSize, cPtrSize, intSize int64) {
 	c.ptrSize = ptrSize
+	c.cPtrSize = cPtrSize
 	c.intSize = intSize
 	c.m = make(map[string]*Type)
 	c.ptrs = make(map[string][]*Type)
@@ -2520,11 +2522,13 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		fatalf("%s: unexpected type: %s", lineno(pos), dtype)
 
 	case *dwarf.AddrType:
-		if t.Size != c.ptrSize {
+		if t.Size != c.cPtrSize {
 			fatalf("%s: unexpected: %d-byte address type - %s", lineno(pos), t.Size, dtype)
 		}
 		t.Go = c.uintptr
-		t.Align = t.Size
+		t.Size = c.ptrSize
+		t.Align = c.ptrSize
+		t.CgoPointer = true
 
 	case *dwarf.ArrayType:
 		if dt.StrideBitSize > 0 {
@@ -2547,6 +2551,9 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		// Recalculate t.Size now that we know sub.Size.
 		t.Size = count * sub.Size
 		t.C.Set("__typeof__(%s[%d])", sub.C, dt.Count)
+		if sub.CgoPointer || sub.CgoStruct != nil || sub.CgoArray != nil {
+			t.CgoArray = &CgoArray{Elem: sub, Count: count}
+		}
 
 	case *dwarf.BoolType:
 		t.Go = c.bool
@@ -2656,11 +2663,12 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 
 	case *dwarf.PtrType:
 		// Clang doesn't emit DW_AT_byte_size for pointer types.
-		if t.Size != c.ptrSize && t.Size != -1 {
+		if t.Size != c.cPtrSize && t.Size != -1 {
 			fatalf("%s: unexpected: %d-byte pointer type - %s", lineno(pos), t.Size, dtype)
 		}
 		t.Size = c.ptrSize
 		t.Align = c.ptrSize
+		t.CgoPointer = true
 
 		if _, ok := base(dt.Type).(*dwarf.VoidType); ok {
 			t.Go = c.goVoidPtr
@@ -2691,6 +2699,9 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		t.Size = t1.Size
 		t.Align = t1.Align
 		t.Go = t1.Go
+		t.CgoPointer = t1.CgoPointer
+		t.CgoStruct = t1.CgoStruct
+		t.CgoArray = t1.CgoArray
 		if unionWithPointer[t1.Go] {
 			unionWithPointer[t.Go] = true
 		}
@@ -2752,11 +2763,13 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 			t.Align = 1 // TODO: should probably base this on field alignment.
 			typedef[name.Name] = t
 		case "struct":
-			g, csyntax, align := c.Struct(dt, pos)
+			g, csyntax, align, size, cgoStruct := c.Struct(dt, pos)
 			if t.C.Empty() {
 				t.C.Set(csyntax)
 			}
 			t.Align = align
+			t.Size = size
+			t.CgoStruct = cgoStruct
 			tt := *t
 			if tag != "" {
 				tt.C = &TypeRepr{"struct %s", []any{tag}}
@@ -2834,6 +2847,9 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 		}
 		t.Go = name
 		t.BadPointer = sub.BadPointer
+		t.CgoPointer = sub.CgoPointer
+		t.CgoStruct = sub.CgoStruct
+		t.CgoArray = sub.CgoArray
 		if unionWithPointer[sub.Go] {
 			unionWithPointer[t.Go] = true
 		}
@@ -2844,6 +2860,9 @@ func (c *typeConv) loadType(dtype dwarf.Type, pos token.Pos, parent string) *Typ
 			tt := *t
 			tt.Go = sub.Go
 			tt.BadPointer = sub.BadPointer
+			tt.CgoPointer = sub.CgoPointer
+			tt.CgoStruct = sub.CgoStruct
+			tt.CgoArray = sub.CgoArray
 			typedef[name.Name] = &tt
 		}
 
@@ -2980,10 +2999,11 @@ func (c *typeConv) FuncArg(dtype dwarf.Type, pos token.Pos) *Type {
 		tr := &TypeRepr{}
 		tr.Set("%s*", t.C)
 		return &Type{
-			Size:  c.ptrSize,
-			Align: c.ptrSize,
-			Go:    &ast.StarExpr{X: t.Go},
-			C:     tr,
+			Size:       c.ptrSize,
+			Align:      c.ptrSize,
+			Go:         &ast.StarExpr{X: t.Go},
+			C:          tr,
+			CgoPointer: true,
 		}
 	case *dwarf.TypedefType:
 		// C has much more relaxed rules than Go for
@@ -3011,6 +3031,9 @@ func (c *typeConv) FuncArg(dtype dwarf.Type, pos token.Pos) *Type {
 			// in case it has __attribute__((unavailable)).
 			// See issue 2888.
 			if isStructUnionClass(t.Go) {
+				t.Typedef = dt.Name
+			}
+			if _, ok := base(ptr.Type).(*dwarf.FuncType); ok {
 				t.Typedef = dt.Name
 			}
 		}
@@ -3086,7 +3109,7 @@ func (c *typeConv) pad(fld []*ast.Field, sizes []int64, size int64) ([]*ast.Fiel
 }
 
 // Struct conversion: return Go and (gc) C syntax for type.
-func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.StructType, csyntax string, align int64) {
+func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.StructType, csyntax string, align, size int64, cgoStruct *CgoStruct) {
 	// Minimum alignment for a struct is 1 byte.
 	align = 1
 
@@ -3123,6 +3146,24 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 				used[goid] = true
 				ident[cid] = goid
 			}
+		}
+	}
+
+	// A memory32 C pointer and a Go pointer have different widths on wasm.
+	// Such a struct cannot simultaneously have its C layout and expose real Go
+	// pointer fields. Give Go its natural layout and retain enough metadata for
+	// the generated call wrapper to marshal to and from the actual C aggregate.
+	if c.ptrSize != c.cPtrSize {
+		mixed := false
+		for _, f := range dt.Field {
+			t := c.Type(f.Type, pos)
+			if t.CgoPointer || t.CgoStruct != nil || t.CgoArray != nil {
+				mixed = true
+				break
+			}
+		}
+		if mixed {
+			return c.mixedPointerStruct(dt, pos, ident)
 		}
 	}
 
@@ -3226,7 +3267,55 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 		godefsFields(fld)
 	}
 	expr = &ast.StructType{Fields: &ast.FieldList{List: fld}}
+	size = dt.ByteSize
 	return
+}
+
+func (c *typeConv) mixedPointerStruct(dt *dwarf.StructType, pos token.Pos, ident map[string]string) (expr *ast.StructType, csyntax string, align, size int64, meta *CgoStruct) {
+	align = 1
+	var cbuf strings.Builder
+	cbuf.WriteString("struct {")
+	var fields []*ast.Field
+	off := int64(0)
+	anon := 0
+	meta = new(CgoStruct)
+	for _, f := range dt.Field {
+		if f.BitOffset > 0 || f.BitSize > 0 {
+			continue
+		}
+		t := c.Type(f.Type, pos)
+		if t.Align <= 0 {
+			continue
+		}
+		aligned := (off + t.Align - 1) &^ (t.Align - 1)
+		if aligned > off {
+			fields = append(fields, &ast.Field{Names: []*ast.Ident{c.Ident("_")}, Type: c.Opaque(aligned - off)})
+		}
+		off = aligned
+		cname := f.Name
+		if cname == "" {
+			cname = fmt.Sprintf("anon%d", anon)
+			anon++
+			ident[cname] = cname
+		}
+		goname := ident[cname]
+		fields = append(fields, &ast.Field{Names: []*ast.Ident{c.Ident(goname)}, Type: t.Go})
+		meta.Fields = append(meta.Fields, CgoStructField{CName: cname, GoName: goname, Type: t})
+		off += t.Size
+		if t.Align > align {
+			align = t.Align
+		}
+		cbuf.WriteString(t.C.String())
+		cbuf.WriteByte(' ')
+		cbuf.WriteString(cname)
+		cbuf.WriteString("; ")
+	}
+	size = (off + align - 1) &^ (align - 1)
+	if size > off {
+		fields = append(fields, &ast.Field{Names: []*ast.Ident{c.Ident("_")}, Type: c.Opaque(size - off)})
+	}
+	cbuf.WriteByte('}')
+	return &ast.StructType{Fields: &ast.FieldList{List: fields}}, cbuf.String(), align, size, meta
 }
 
 // dwarfHasPointer reports whether the DWARF type dt contains a pointer.

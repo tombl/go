@@ -79,6 +79,37 @@ var (
 	secureMode   bool
 )
 
+// cgoInitWasm establishes the main instance's Go stack bounds and lets libcgo
+// install the native setg callback before the scheduler starts pthreads.
+// musl already owns process startup at this point.
+func cgoInitWasm() {
+	lo := uintptr(unsafe.Pointer(&wasmStack))
+	g0.stack.lo = lo
+	g0.stack.hi = lo + unsafe.Sizeof(wasmStack)
+	g0.stackguard0 = lo + stackGuard
+	g0.stackguard1 = g0.stackguard0
+	if _cgo_init != nil {
+		setg := unsafe.Pointer(abi.FuncPCABI0(wasmSetgGCC))
+		wasmCgoInit(_cgo_init, unsafe.Pointer(&g0), setg)
+	}
+}
+
+func wasmSetgGCC()
+func wasmCgoInit(fn, gp, setg unsafe.Pointer)
+
+// cgoCrosscall2Wasm is the native WebAssembly entry for callbacks generated
+// by cmd/cgo. C function pointers are table indices, while Go PCs reserve the
+// low 16 bits for the continuation block number.
+//
+// The compiler-generated wasm export wrapper is important here: it drives the
+// continuation loop if cgocallbackg schedules or grows the Go stack.
+//
+//go:nosplit
+//go:wasmexport crosscall2
+func cgoCrosscall2Wasm(fn, frame uint32, _ int32, ctxt uint32) {
+	cgocallback(uintptr(fn)<<16, uintptr(frame), uintptr(ctxt))
+}
+
 //go:wasmimport linux copy_siginfo
 //go:nosplit
 //go:noescape
@@ -454,11 +485,55 @@ func wasmArgsWord(base unsafe.Pointer, off uintptr) uint32 {
 	return *(*uint32)(add(base, off))
 }
 
+//go:nosplit
+func wasmNativeArgWord(argv **byte, index uintptr) uint32 {
+	return *(*uint32)(add(unsafe.Pointer(argv), index*4))
+}
+
 // sysargs converts the kernel's wasm32 process argument blob into the
 // 64-bit pointer vector used by GOARCH=wasm.
 //
 //go:nosplit
-func sysargs(_ int32, _ **byte) {
+func sysargs(c int32, v **byte) {
+	if iscgo {
+		// musl has already consumed the kernel's process-argument handoff and
+		// passed its native wasm32 argv to __main_argc_argv_envp. Keep that
+		// startup ownership: locate and widen only the auxiliary vector here.
+		pos := uintptr(c) + 1
+		for wasmNativeArgWord(v, pos) != 0 { // envp
+			pos++
+		}
+		pos++
+
+		out := wasmArgv[:]
+		outPos := 0
+		for {
+			if outPos+2 > len(out) {
+				throw("too many auxiliary vector entries")
+			}
+			tag := uintptr(wasmNativeArgWord(v, pos))
+			val := uintptr(wasmNativeArgWord(v, pos+1))
+			pos += 2
+			out[outPos] = tag
+			out[outPos+1] = val
+			outPos += 2
+			switch tag {
+			case 6: // AT_PAGESZ
+				physPageSize = val
+			case 23: // AT_SECURE
+				secureMode = val == 1
+			case 25: // AT_RANDOM
+				startupRand = (*[16]byte)(unsafe.Pointer(val))[:]
+			}
+			archauxv(tag, val)
+			if tag == 0 {
+				break
+			}
+		}
+		auxv = out[: outPos-2 : outPos-2]
+		return
+	}
+
 	base := unsafe.Pointer(&wasmArgsBlob[0])
 	_, _, errno := linuxsys.Syscall6(linuxsys.SYS_WASM_GET_ARGS, uintptr(base), uintptr(len(wasmArgsBlob)), 0, 0, 0, 0)
 	if errno != 0 {

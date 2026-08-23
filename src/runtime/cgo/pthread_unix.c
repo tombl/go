@@ -73,7 +73,7 @@ x_cgo_sys_thread_create(void* (*func)(void*)) {
 	}
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_getstackbound(uintptr bounds[2])
 {
 	pthread_attr_t attr;
@@ -113,6 +113,7 @@ x_cgo_getstackbound(uintptr bounds[2])
 	bounds[0] = (uintptr)addr;
 	bounds[1] = (uintptr)addr + size;
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }
 
 // _cgo_try_pthread_create retries pthread_create if it fails with EAGAIN.

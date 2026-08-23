@@ -52,3 +52,33 @@ func TestFunctionImports(t *testing.T) {
 		t.Fatalf("Imports[0] = %+v", got)
 	}
 }
+
+func TestInitFunctions(t *testing.T) {
+	o := new(Object)
+	// linking version 2, INIT_FUNCS subsection containing two
+	// (priority, symbol-index) pairs.
+	if err := parseLinking([]byte{2, 6, 5, 2, 3, 9, 7, 11}, o); err != nil {
+		t.Fatal(err)
+	}
+	want := []InitFunction{{Priority: 3, Symbol: 9}, {Priority: 7, Symbol: 11}}
+	if len(o.InitFunctions) != len(want) {
+		t.Fatalf("InitFunctions = %+v, want %+v", o.InitFunctions, want)
+	}
+	for i := range want {
+		if o.InitFunctions[i] != want[i] {
+			t.Fatalf("InitFunctions[%d] = %+v, want %+v", i, o.InitFunctions[i], want[i])
+		}
+	}
+}
+
+func TestTLSRelocationAddend(t *testing.T) {
+	// DATA section 8, one TLS relocation at offset 5 against symbol 3,
+	// with the signed addend -4.
+	rels, err := parseRelocations([]byte{8, 1, RMemoryAddrTLSSLEB, 5, 3, 0x7c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rels) != 1 || rels[0].Addend != -4 {
+		t.Fatalf("relocations = %+v, want addend -4", rels)
+	}
+}

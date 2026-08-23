@@ -9,10 +9,11 @@
 #include <stdlib.h>
 
 /* Stub for calling clearenv */
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_clearenv(void **env __attribute__((unused)))
 {
 	_cgo_tsan_acquire();
 	clearenv();
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }

@@ -18,6 +18,7 @@ import (
 	"internal/buildcfg"
 	"io"
 	"regexp"
+	"sort"
 )
 
 const (
@@ -99,6 +100,13 @@ var wasmFuncTypes = map[string]*wasmFuncType{
 	"memeqbody":               {Params: []byte{I64, I64, I64}, Results: []byte{I64}},      // a, b, len -> 0/1
 	"memcmp":                  {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // a, b, len -> <0/0/>0
 	"memchr":                  {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // s, c, len -> index
+	"_cgo_topofstack":         {Results: []byte{I32}},                                     // native C ABI
+	"crosscall1":              {Params: []byte{I32, I32, I32}},                            // fn, setg, g
+	"crosscall2":              {Params: []byte{I32, I32, I32, I32}},                       // fn, frame, size, ctxt
+	"runtime.wasmSetgGCC":     {Params: []byte{I32}},                                      // native setg callback
+	"__main_argc_argv_envp":   {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // musl main adapter
+	"__wasm_call_ctors":       {},                                                         // synthesized native constructor dispatcher
+	"__wasm_init_tls":         {},                                                         // synthesized native TLS initializer
 }
 
 func assignAddress(ldr *loader.Loader, sect *sym.Section, n int, s loader.Sym, va uint64, isTramp bool) (*sym.Section, int, uint64) {
@@ -161,6 +169,13 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 		// 0 if the function returned normally or
 		// 1 if the stack needs to be unwound.
 		{Params: []byte{I32}, Results: []byte{I32}},
+		// Native one-argument callbacks such as setg retain void(void*).
+		// Cgo call wrappers use type 0's int32(void*) signature so cgocall can
+		// return errno without violating WebAssembly's strict type checks.
+		{Params: []byte{I32}},
+		// x_cgo_init has the fixed native signature
+		// void(void*, void (*)(void*), void**, void**).
+		{Params: []byte{I32, I32, I32, I32}},
 	}
 
 	// collect host imports (functions that get imported from the WebAssembly host, usually JavaScript)
@@ -212,6 +227,7 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 	// collect functions with WebAssembly body
 	var buildid []byte
 	fns := make([]*wasmFunc, len(ctxt.Textp))
+	ctorFn, tlsInitFn := -1, -1
 	for i, fn := range ctxt.Textp {
 		wfn := new(bytes.Buffer)
 		if ldr.SymName(fn) == "go:buildid" {
@@ -255,8 +271,10 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 					}
 				case objabi.R_WASMIMPORT:
 					writeSleb128(wfn, hostImportMap[rs])
-				case objabi.R_WASM_GLOBAL_INDEX, objabi.R_WASM_TABLE_NUMBER, objabi.R_WASM_CONST:
+				case objabi.R_WASM_GLOBAL_INDEX, objabi.R_WASM_TABLE_NUMBER:
 					writeUleb128(wfn, uint64(r.Add()))
+				case objabi.R_WASM_CONST:
+					writeSleb128(wfn, r.Add())
 				case objabi.R_WASM_TABLE_INDEX:
 					if !ldr.SymType(rs).IsText() {
 						ldr.Errorf(fn, "unresolved WebAssembly C table function %s", ldr.SymName(rs))
@@ -312,23 +330,43 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 
 		name := nameRegexp.ReplaceAllString(ldr.SymName(fn), "_")
 		fns[i] = &wasmFunc{Name: name, Type: typ, Code: wfn.Bytes()}
+		switch ldr.SymName(fn) {
+		case "__wasm_call_ctors":
+			ctorFn = i
+		case "__wasm_init_tls":
+			tlsInitFn = i
+		}
 	}
 
 	var dataSegments []*dataSegment
 	linuxStartIndex := -1
 	if buildcfg.GOOS == "linux" {
 		dataSegments = collectDataSegments()
+		normalDataSegments := len(dataSegments)
+		if tlsData, _ := ldr.WasmTLS(); tlsData != nil {
+			tlsSegment := len(dataSegments)
+			dataSegments = append(dataSegments, &dataSegment{data: tlsData})
+			if tlsInitFn >= 0 {
+				fns[tlsInitFn].Code = wasmTLSInitCode(tlsSegment, len(tlsData))
+			}
+		}
+		if ctorFn >= 0 {
+			fns[ctorFn].Code = wasmCtorCode(ldr, len(hostImports))
+		}
 		nullType := lookupType(&wasmFuncType{}, &types)
 		initIndex := len(hostImports) + len(fns)
 		fns = append(fns, &wasmFunc{
 			Name: "wasm_linux_init_memory",
 			Type: nullType,
-			Code: linuxMemoryInitCode(dataSegments),
+			Code: linuxMemoryInitCode(dataSegments[:normalDataSegments]),
 		})
 
-		entry := ldr.Lookup("_rt0_wasm_linux", 0)
+		entry := ldr.Lookup("_start", 0)
+		if entry == 0 || !ldr.SymType(entry).IsText() {
+			entry = ldr.Lookup("_rt0_wasm_linux", 0)
+		}
 		if entry == 0 {
-			ld.Errorf("export symbol _rt0_wasm_linux not defined")
+			ld.Errorf("neither native _start nor _rt0_wasm_linux is defined")
 		}
 		entryIndex := len(hostImports) + int(ldr.SymValue(entry)>>16) - funcValueOffset
 		linuxStartIndex = len(hostImports) + len(fns)
@@ -354,7 +392,7 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 	if buildcfg.GOOS != "linux" {
 		writeMemorySec(ctxt, ldr)
 	}
-	writeGlobalSec(ctxt)
+	writeGlobalSec(ctxt, ldr)
 	writeExportSec(ctxt, ldr, len(hostImports), linuxStartIndex)
 	writeElementSec(ctxt, uint64(len(hostImports)), uint64(len(fns)))
 	if buildcfg.GOOS == "linux" {
@@ -507,7 +545,7 @@ func writeMemorySec(ctxt *ld.Link, ldr *loader.Loader) {
 }
 
 // writeGlobalSec writes the section that declares global variables.
-func writeGlobalSec(ctxt *ld.Link) {
+func writeGlobalSec(ctxt *ld.Link, ldr *loader.Loader) {
 	sizeOffset := writeSecHeader(ctxt, sectionGlobal)
 
 	globalRegs := []byte{
@@ -524,12 +562,24 @@ func writeGlobalSec(ctxt *ld.Link) {
 
 	writeUleb128(ctxt.Out, uint64(len(globalRegs))) // number of globals
 
-	for _, typ := range globalRegs {
+	for i, typ := range globalRegs {
 		ctxt.Out.WriteByte(typ)
 		ctxt.Out.WriteByte(0x01) // var
 		switch typ {
 		case I32:
-			writeI32Const(ctxt.Out, 0)
+			initial := int32(0)
+			if i == 0 && buildcfg.GOOS == "linux" {
+				// musl's crt1 uses __stack_pointer before it reaches Go's
+				// startup adapter. Give it the same statically reserved stack
+				// that the pure-Go entry point installs explicitly.
+				stack := ldr.Lookup("runtime.wasmStack", 0)
+				if stack == 0 {
+					ld.Errorf("runtime.wasmStack is not defined")
+				} else {
+					initial = int32(ldr.SymValue(stack) + ldr.SymSize(stack) - 16)
+				}
+			}
+			writeI32Const(ctxt.Out, initial)
 		case I64:
 			writeI64Const(ctxt.Out, 0)
 		}
@@ -714,6 +764,37 @@ func linuxMemoryInitCode(segments []*dataSegment) []byte {
 		w.WriteByte(0xfc)
 		writeUleb128(w, 9) // data.drop
 		writeUleb128(w, uint64(i))
+	}
+	w.WriteByte(0x0b) // end
+	return w.Bytes()
+}
+
+func wasmTLSInitCode(segment, size int) []byte {
+	w := new(bytes.Buffer)
+	writeUleb128(w, 0) // local declarations
+	w.WriteByte(0x20)  // local.get destination
+	writeUleb128(w, 0)
+	writeI32Const(w, 0)
+	writeI32Const(w, int32(size))
+	w.WriteByte(0xfc)
+	writeUleb128(w, 8) // memory.init
+	writeUleb128(w, uint64(segment))
+	writeUleb128(w, 0) // memory index
+	w.WriteByte(0x0b)  // end; do not drop, every pthread instance needs it
+	return w.Bytes()
+}
+
+func wasmCtorCode(ldr *loader.Loader, numImports int) []byte {
+	inits := append([]loader.WasmInitFunc(nil), ldr.WasmInitFuncs()...)
+	sort.SliceStable(inits, func(i, j int) bool { return inits[i].Priority < inits[j].Priority })
+	w := new(bytes.Buffer)
+	writeUleb128(w, 0) // local declarations
+	for _, init := range inits {
+		if pc := ldr.SymValue(init.Sym) >> 16; pc < funcValueOffset {
+			panic(fmt.Sprintf("WebAssembly constructor %s was not assigned a function index (value %#x)", ldr.SymName(init.Sym), ldr.SymValue(init.Sym)))
+		}
+		w.WriteByte(0x10) // call
+		writeUleb128(w, uint64(numImports)+uint64(ldr.SymValue(init.Sym)>>16-funcValueOffset))
 	}
 	w.WriteByte(0x0b) // end
 	return w.Bytes()

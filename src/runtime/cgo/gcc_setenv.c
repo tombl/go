@@ -9,19 +9,21 @@
 #include <stdlib.h>
 
 /* Stub for calling setenv */
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_setenv(char **arg)
 {
 	_cgo_tsan_acquire();
 	setenv(arg[0], arg[1], 1);
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }
 
 /* Stub for calling unsetenv */
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_unsetenv(char **arg)
 {
 	_cgo_tsan_acquire();
 	unsetenv(arg[0]);
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }

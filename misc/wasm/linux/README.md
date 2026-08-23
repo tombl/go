@@ -78,7 +78,7 @@ SIGSEGV/SIGFPE panic path.
 
 ## Current unsupported features
 
-- production cgo (the static-cgo linker/runtime prototype is in progress)
+- dynamic cgo and non-static C linkage
 - the race detector
 - asynchronous Go preemption
 - synchronous fault-to-signal translation
@@ -89,26 +89,22 @@ SIGSEGV/SIGFPE panic path.
 These are feature exclusions, not reasons to weaken supported syscalls such as
 epoll, time, timerfd, readv, or writev.
 
-## Static cgo roadmap
+## Static cgo
 
-There is no kernel-level reason that statically linked cgo cannot work: the
-platform already runs C and provides shared memory and pthreads. The missing
-pieces are in the Go toolchain and the mixed ABI:
+Statically linked cgo uses wasm-ld for archive selection and one relocatable
+aggregate, then the Go linker owns final module emission. musl crt1 owns
+startup, libc owns `memory.grow`, and generated cgo wrappers translate between
+the 64-bit Go pointer ABI and wasm32 C pointers. Calls switch to g0; callbacks
+from both Go-created and C-created pthreads attach to the scheduler and may
+grow/copy Go stacks.
 
-1. Finish the aggregate relocatable object's data, constructor, fini, and
-   non-empty C TLS relocations. wasm-ld already owns whole-program static
-   archive selection; the Go linker owns the final module.
-2. Implement `asmcgocall` to enter native-signature C and implement the
-   `cgocallback` path back to the correct g and M. musl crt1 remains the owner
-   of startup and hands off through a native Go entry adapter.
-3. Make libc the sole owner of `memory.grow` in cgo executables. Go requests
-   aligned heap regions through libc instead of advancing a second break.
-4. Complete generated pointer and aggregate translation for the 64-bit Go ABI
-   versus wasm32 C ABI, including checked Go-to-C pointer narrowing.
-5. Add pointer-rule, callback, blocking-call, C-created-thread, TLS-destructor,
-   GC, and SMP stress tests. Static cgo should be completed before considering
-   dynamic loading, which is a separate and currently unsupported platform
-   feature.
+The focused integration program covers pointer-bearing structs and arrays,
+aggregate results, function pointers, errno, libc allocation, callbacks,
+pthread teardown, GC, and SMP execution on 1-, 2-, and 4-CPU guests. Remaining
+work is ecosystem and unusual-ABI validation (notably packed/bitfield
+aggregates, pointer-bearing unions, and C++ unwinding), before static cgo can be
+called broadly production-ready. Dynamic loading remains a separate and
+unsupported platform feature.
 
 The current implementation checkpoint and validated VM probe are documented in
 `cgo-prototype/DESIGN.md`.

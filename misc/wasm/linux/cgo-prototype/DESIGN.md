@@ -45,8 +45,9 @@ TLS is initialized before the new instance calls into Go. Raw Go `clone`
 remains valid only for `CGO_ENABLED=0`.
 
 The globals coexist; Go TLS does not need to be reimplemented using musl TLS.
-The linker still needs to lay out non-empty `.tdata`/`.tbss`, synthesize
-`__tls_size` and `__tls_align`, and implement TLS-relative relocations.
+The linker lays out non-empty `.tdata`/`.tbss`, synthesizes `__tls_size` and
+`__tls_align`, and resolves TLS-relative relocations. Each pthread instance
+copies the template through the synthesized `__wasm_init_tls` entry.
 
 ## Pointer boundary
 
@@ -60,9 +61,17 @@ high bits. `unsafe.Pointer` and integer conversions can manufacture an invalid
 64-bit value; silently truncating it would alias an unrelated low address.
 The check is an ABI safety invariant, not an allocator fast-path check.
 
-Aggregate field translation stays in generated C/Go wrappers. WebAssembly's
-strict function types mean that no generic variadic or untyped trampoline can
-substitute for signature-specific adapters.
+Aggregate field translation stays in generated C/Go wrappers. Pointer-bearing
+structs and arrays use a natural 64-bit-pointer Go layout and are marshalled
+field by field to the compact C layout. Function-pointer typedefs retain their
+C spelling at the narrowing boundary. WebAssembly's strict function types mean
+that no generic variadic or untyped trampoline can substitute for these
+generated adapters.
+
+All functions passed to `runtime.asmcgocall` use the exact WebAssembly type
+`int32(void*)`. Ordinary cgo and runtime/cgo wrappers return zero; errno
+wrappers return the captured value. This makes explicit the return-register
+convention that native machine ABIs normally leave implicit.
 
 ## Static link split
 
@@ -87,18 +96,24 @@ wasm function type. They are emitted directly; there is no extra syscall
 wrapper. Linker-synthesized `env` symbols remain unresolved for Go or the final
 linker model to provide.
 
-## Implementation order
+## Current checkpoint and remaining work
 
-1. Finish DATA relocations, init/fini boundaries, constructor collection, and
-   non-empty LLVM TLS layout.
-2. Add native-signature `asmcgocall`, callback/crosscall, and startup adapters;
-   prohibit longjmp and exceptions from crossing Go frames.
-3. Add the libc-backed cgo heap-region provider and remove direct Go
-   `memory.grow` from cgo builds.
-4. Validate scalar, pointer, struct, string/slice, callback, errno, destructor,
-   and concurrent pthread cases in the distro VM.
-5. Run the pure-Go standard-library and ecosystem suites unchanged, then add
-   cgo-enabled packages and stress tests on 1-, 2-, and 4-CPU guests.
+The linker relocation/TLS/constructor path, musl startup handoff,
+native-signature calls, callback/crosscall path, libc-backed heap regions, and
+mixed-pointer-width generator are implemented. The integration test covers
+scalars, direct and allocated pointers, strings/slices, pointer-bearing
+aggregates and arrays, aggregate results, function pointers, errno, stack
+growth, scheduled callbacks, destructor cleanup, and concurrent pthread cases.
+It passes feature-enabled validation and 1-, 2-, and 4-CPU distro guests.
+
+The remaining work is validation breadth rather than a known kernel contract
+change: run the standard library and the distro's Unix-oriented ecosystem
+matrix unchanged, classify packages that assume fork/dlopen/PIE, add real cgo
+dependencies beyond the focused probe, and turn any newly observed relocation
+or ABI shape into a minimized regression test. C++ exceptions, `setjmp`/
+`longjmp` across Go frames, pointer-bearing unions, and packed/bitfield
+aggregates remain explicit audit cases; they must either be translated safely
+or rejected clearly rather than silently mislaid out.
 
 No kernel change is currently required by this design. The native threaded
 probe validates the existing clone/Worker mapping, shared memory, atomics,

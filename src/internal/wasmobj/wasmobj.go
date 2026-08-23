@@ -63,10 +63,20 @@ type Function struct {
 
 // A DataSegment is one data segment in a relocatable object.
 type DataSegment struct {
-	Name  string
-	Align uint32 // log2 alignment, as encoded by the linking section
-	Flags uint32
-	Data  []byte
+	Name       string
+	Align      uint32 // log2 alignment, as encoded by the linking section
+	Flags      uint32
+	Data       []byte
+	DataOffset uint64 // offset of Data in the DATA section relocation coordinate space
+}
+
+const SegmentFlagTLS = 0x2
+
+// An InitFunction is a constructor recorded in the linking section. Symbol is
+// an index into Object.Symbols, not a WebAssembly function index.
+type InitFunction struct {
+	Priority uint32
+	Symbol   uint32
 }
 
 // WebAssembly linking symbol kinds.
@@ -123,6 +133,12 @@ const (
 	RTableIndexSLEB64
 	RTableIndexI64
 	RTableNumberLEB
+	RMemoryAddrTLSSLEB
+	RFunctionOffsetI64
+	RMemoryAddrLocrelI32
+	RTableIndexRelSLEB64
+	RMemoryAddrTLSSLEB64
+	RFunctionIndexI32
 )
 
 // A Relocation is an entry in a reloc.* custom section. Section is the
@@ -147,14 +163,15 @@ type Import struct {
 
 // An Object is the relocatable-object information needed by a linker.
 type Object struct {
-	Types       []FuncType
-	Imports     []Import
-	Functions   []Function
-	Segments    []DataSegment
-	Symbols     []Symbol
-	Relocations []Relocation
-	CodeSection uint32
-	DataSection uint32
+	Types         []FuncType
+	Imports       []Import
+	Functions     []Function
+	Segments      []DataSegment
+	Symbols       []Symbol
+	InitFunctions []InitFunction
+	Relocations   []Relocation
+	CodeSection   uint32
+	DataSection   uint32
 }
 
 // Open reads a WebAssembly module or relocatable object from name.
@@ -546,11 +563,39 @@ func parseLinking(b []byte, o *Object) error {
 			if err := parseSegmentInfo(payload, o); err != nil {
 				return err
 			}
+		case 6:
+			if err := parseInitFunctions(payload, o); err != nil {
+				return err
+			}
 		case 8:
 			if err := parseSymbols(payload, o); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func parseInitFunctions(b []byte, o *Object) error {
+	d := decoder{b: b}
+	n, err := d.uleb()
+	if err != nil {
+		return err
+	}
+	o.InitFunctions = make([]InitFunction, n)
+	for i := range o.InitFunctions {
+		priority, err := d.uleb()
+		if err != nil || priority > uint64(^uint32(0)) {
+			return errors.New("invalid init function priority")
+		}
+		symbol, err := d.uleb()
+		if err != nil || symbol > uint64(^uint32(0)) {
+			return errors.New("invalid init function symbol")
+		}
+		o.InitFunctions[i] = InitFunction{Priority: uint32(priority), Symbol: uint32(symbol)}
+	}
+	if d.off != len(d.b) {
+		return errors.New("trailing init function data")
 	}
 	return nil
 }
@@ -671,7 +716,9 @@ func parseRelocations(b []byte) ([]Relocation, error) {
 		case RMemoryAddrLEB, RMemoryAddrSLEB, RMemoryAddrI32,
 			RFunctionOffsetI32, RSectionOffsetI32, RMemoryAddrRelSLEB,
 			RMemoryAddrLEB64, RMemoryAddrSLEB64, RMemoryAddrI64,
-			RMemoryAddrRelSLEB64, RTableIndexSLEB64, RTableIndexI64:
+			RMemoryAddrRelSLEB64, RTableIndexSLEB64, RTableIndexI64,
+			RMemoryAddrTLSSLEB, RFunctionOffsetI64, RMemoryAddrLocrelI32,
+			RTableIndexRelSLEB64, RMemoryAddrTLSSLEB64:
 			r.Addend, err = d.sleb()
 			if err != nil {
 				return nil, err
@@ -730,6 +777,7 @@ func parseData(f *File, o *Object) error {
 		if err != nil {
 			return err
 		}
+		o.Segments[i].DataOffset = uint64(d.off)
 		contents, err := d.bytes(size)
 		if err != nil {
 			return err

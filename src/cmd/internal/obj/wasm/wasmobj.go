@@ -1100,6 +1100,11 @@ var notUsePC_B = map[string]bool{
 	"memeqbody":               true,
 	"memcmp":                  true,
 	"memchr":                  true,
+	"_cgo_topofstack":         true,
+	"crosscall1":              true,
+	"crosscall2":              true,
+	"runtime.wasmSetgGCC":     true,
+	"__main_argc_argv_envp":   true,
 }
 
 func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
@@ -1136,7 +1141,8 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	switch s.Name {
 	case "_rt0_wasm_js", "_rt0_wasm_linux", "_rt0_wasm_wasip1", "_rt0_wasm_wasip1_lib",
 		"wasm_export_run", "wasm_export_resume", "wasm_export_getsp",
-		"wasm_pc_f_loop", "runtime.wasmDiv", "runtime.wasmTruncS", "runtime.wasmTruncU", "memeqbody":
+		"wasm_pc_f_loop", "runtime.wasmDiv", "runtime.wasmTruncS", "runtime.wasmTruncU", "memeqbody",
+		"_cgo_topofstack", "crosscall1", "crosscall2", "runtime.wasmSetgGCC", "__main_argc_argv_envp":
 		varDecls = []*varDecl{}
 		useAssemblyRegMap()
 	case "runtime.wasmMstart":
