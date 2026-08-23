@@ -262,7 +262,9 @@ type Loader struct {
 	// CgoExports records cgo-exported symbols by SymName.
 	CgoExports map[string]Sym
 
-	WasmExports []Sym
+	WasmExports  []Sym
+	wasmType     map[Sym]Sym    // WebAssembly host-object function types
+	wasmTypeData map[Sym][]byte // retained after external symbol data is emitted
 
 	// sizeFixups records symbols that we need to fix up the size
 	// after loading. It is very rarely needed, only for a DATA symbol
@@ -1728,7 +1730,36 @@ func (l *Loader) WasmImportSym(fnSymIdx Sym) Sym {
 }
 
 func (l *Loader) WasmTypeSym(s Sym) Sym {
+	if t := l.wasmType[s]; t != 0 {
+		return t
+	}
 	return l.aux1(s, goobj.AuxWasmType)
+}
+
+// SetWasmTypeSym associates a WebAssembly host-object function with its
+// serialized function-type symbol.
+func (l *Loader) SetWasmTypeSym(s, typeSym Sym) {
+	if l.wasmType == nil {
+		l.wasmType = make(map[Sym]Sym)
+	}
+	l.wasmType[s] = typeSym
+}
+
+// SetWasmTypeData retains serialized WebAssembly type data through the data
+// emission pass, which releases ordinary external-symbol payloads.
+func (l *Loader) SetWasmTypeData(s Sym, data []byte) {
+	if l.wasmTypeData == nil {
+		l.wasmTypeData = make(map[Sym][]byte)
+	}
+	l.wasmTypeData[s] = append([]byte(nil), data...)
+}
+
+// WasmTypeData returns serialized WebAssembly type data.
+func (l *Loader) WasmTypeData(s Sym) []byte {
+	if data := l.wasmTypeData[s]; data != nil {
+		return data
+	}
+	return l.Data(s)
 }
 
 // SEHUnwindSym returns the auxiliary SEH unwind symbol associated with

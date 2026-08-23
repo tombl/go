@@ -16,6 +16,7 @@ import (
 	"debug/elf"
 	"encoding/json"
 	"fmt"
+	"internal/buildcfg"
 	"io"
 	"os"
 	"sort"
@@ -347,6 +348,9 @@ func adddynlib(ctxt *Link, lib string) {
 	if seenlib[lib] || ctxt.LinkMode == LinkExternal {
 		return
 	}
+	if ctxt.HeadType == objabi.Hlinux && buildcfg.GOARCH == "wasm" {
+		return // linux/wasm cgo has no dynamic-loader contract
+	}
 	seenlib[lib] = true
 
 	if ctxt.IsELF {
@@ -364,6 +368,9 @@ func adddynlib(ctxt *Link, lib string) {
 func Adddynsym(ldr *loader.Loader, target *Target, syms *ArchSyms, s loader.Sym) {
 	if ldr.SymDynid(s) >= 0 || target.LinkMode == LinkExternal {
 		return
+	}
+	if target.HeadType == objabi.Hlinux && buildcfg.GOARCH == "wasm" {
+		return // cgo exports are statically resolved in the final module
 	}
 
 	if target.IsELF {

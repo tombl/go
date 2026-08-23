@@ -438,6 +438,18 @@ const (
 	R_DWTXTADDR_U3
 	R_DWTXTADDR_U4
 
+	// The following relocations are used by relocatable WebAssembly host
+	// objects. They are resolved while the final module is encoded because
+	// WebAssembly immediates are variable-width LEB128 values.
+	R_WASM_GLOBAL_INDEX
+	R_WASM_TYPE_INDEX
+	R_WASM_TABLE_INDEX
+	R_WASM_TABLE_NUMBER
+	R_WASM_CONST
+	R_WASM_ADDR_I32
+	R_WASM_CALL
+	R_WASM_ADDR_LEB
+
 	// R_WEAK marks the relocation as a weak reference.
 	// A weak relocation does not make the symbol it refers to reachable,
 	// and is only honored by the linker if the symbol is in some other way
