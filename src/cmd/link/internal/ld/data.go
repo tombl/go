@@ -350,6 +350,12 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			} else {
 				log.Fatalf("cannot handle R_TLS_IE (sym %s) when linking internally", ldr.SymName(s))
 			}
+		case objabi.R_WASM_TABLE_INDEX_I32:
+			if !target.IsWasm() || siz != 4 || !rst.IsText() {
+				st.err.Errorf(s, "invalid WebAssembly table-index relocation to %s", ldr.SymName(rs))
+				continue
+			}
+			o = (ldr.SymValue(rs) >> 16) + r.Add()
 		case objabi.R_ADDR, objabi.R_PEIMAGEOFF:
 			if weak && !ldr.AttrReachable(rs) {
 				// Redirect it to runtime.unreachableMethod, which will throw if called.
@@ -3258,7 +3264,15 @@ func (ctxt *Link) address() []*sym.Segment {
 	ctxt.xdefine("runtime.gcmask.*", sym.SGCMASK, int64(noptrbss.Vaddr+uint64(ldr.SymValue(s))))
 	ctxt.xdefine("runtime.covctrs", sym.SCOVERAGE_COUNTER, int64(noptrbss.Vaddr+covCounterDataStartOff))
 	ctxt.xdefine("runtime.ecovctrs", sym.SCOVERAGE_COUNTER, int64(noptrbss.Vaddr+covCounterDataStartOff+covCounterDataLen))
-	ctxt.xdefine("runtime.end", sym.SBSS, int64(Segdata.Vaddr+Segdata.Length))
+	runtimeEnd := int64(Segdata.Vaddr + Segdata.Length)
+	if ctxt.Target.IsWasm() && ctxt.HeadType == objabi.Hlinux {
+		// musl's wasm sbrk-backed allocators require page-aligned regions and
+		// use the executable's __heap_end as their initial break. Pure-Go wasm
+		// already rounds this boundary in initBloc; expose the same aligned
+		// value to native objects so every subsequent libc sbrk remains aligned.
+		runtimeEnd = Rnd(runtimeEnd, 64<<10)
+	}
+	ctxt.xdefine("runtime.end", sym.SBSS, runtimeEnd)
 
 	if fuzzCounters != nil {
 		if *flagAsan {

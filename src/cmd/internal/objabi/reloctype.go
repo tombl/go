@@ -449,6 +449,7 @@ const (
 	R_WASM_ADDR_I32
 	R_WASM_CALL
 	R_WASM_ADDR_LEB
+	R_WASM_TABLE_INDEX_I32
 
 	// R_WEAK marks the relocation as a weak reference.
 	// A weak relocation does not make the symbol it refers to reachable,

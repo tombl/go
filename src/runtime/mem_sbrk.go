@@ -285,6 +285,29 @@ func sysReserveAlignedSbrk(size, align uintptr) (unsafe.Pointer, uintptr) {
 			p = start
 			return
 		}
+		if GOARCH == "wasm" && iscgo {
+			// A libc-owned region is not necessarily contiguous with bloc.
+			// Overallocate, retain the aligned middle, and return both edges
+			// to Go's own free list rather than pretending to extend a break.
+			base := sbrk(size + align)
+			if base == nil {
+				p, size = 0, 0
+				unlock(&memlock)
+				return
+			}
+			start := alignUp(uintptr(base), align)
+			if leading := start - uintptr(base); leading != 0 {
+				memFree(base, leading)
+			}
+			end := start + size
+			if trailing := uintptr(base) + memRound(size+align) - end; trailing != 0 {
+				memFree(unsafe.Pointer(end), trailing)
+			}
+			memCheck()
+			p = start
+			unlock(&memlock)
+			return
+		}
 
 		// Round up bloc to align, then allocate size.
 		p = alignUp(bloc, align)

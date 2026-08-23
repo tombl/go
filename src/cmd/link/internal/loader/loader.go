@@ -266,6 +266,9 @@ type Loader struct {
 	wasmType       map[Sym]Sym            // WebAssembly host-object function types
 	wasmTypeData   map[Sym][]byte         // retained after external symbol data is emitted
 	wasmHostImport map[Sym]obj.WasmImport // native WebAssembly imports from host objects
+	wasmTLSData    []byte                 // LLVM TLS initialization image for cgo
+	wasmTLSAlign   uint32                 // byte alignment of wasmTLSData
+	wasmInitFuncs  []WasmInitFunc         // native constructors in priority order
 
 	// sizeFixups records symbols that we need to fix up the size
 	// after loading. It is very rarely needed, only for a DATA symbol
@@ -281,6 +284,13 @@ type Loader struct {
 
 	npkgsyms    int // number of package symbols, for accounting
 	nhashedsyms int // number of hashed symbols, for accounting
+}
+
+// WasmInitFunc describes a native constructor retained from a relocatable
+// WebAssembly object's linking section.
+type WasmInitFunc struct {
+	Priority uint32
+	Sym      Sym
 }
 
 const (
@@ -1776,6 +1786,25 @@ func (l *Loader) WasmTypeData(s Sym) []byte {
 		return data
 	}
 	return l.Data(s)
+}
+
+// SetWasmTLS records the complete LLVM TLS initialization image produced by
+// the aggregate static-cgo link.
+func (l *Loader) SetWasmTLS(data []byte, align uint32) {
+	l.wasmTLSData = append([]byte(nil), data...)
+	l.wasmTLSAlign = align
+}
+
+func (l *Loader) WasmTLS() ([]byte, uint32) {
+	return l.wasmTLSData, l.wasmTLSAlign
+}
+
+func (l *Loader) AddWasmInitFunc(priority uint32, s Sym) {
+	l.wasmInitFuncs = append(l.wasmInitFuncs, WasmInitFunc{Priority: priority, Sym: s})
+}
+
+func (l *Loader) WasmInitFuncs() []WasmInitFunc {
+	return l.wasmInitFuncs
 }
 
 // SEHUnwindSym returns the auxiliary SEH unwind symbol associated with

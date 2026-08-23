@@ -252,7 +252,7 @@ func (p *Package) writeDefs() {
 
 	if callsMalloc && !*gccgo {
 		fmt.Fprint(fgo2, strings.ReplaceAll(cMallocDefGo, "PREFIX", cPrefix))
-		fmt.Fprint(fgcc, strings.ReplaceAll(strings.Replace(cMallocDefC, "PREFIX", cPrefix, -1), "PACKED", p.packedAttribute()))
+		fmt.Fprint(fgcc, p.cMallocDefC())
 	}
 
 	if err := fgcc.Close(); err != nil {
@@ -454,42 +454,45 @@ func checkImportSymName(s string) {
 	}
 }
 
+// stripConst removes an unusable top-level const qualifier. Such a qualifier
+// is meaningless on a frame field or temporary, and may be followed by other
+// top-level qualifiers. See #75751.
+func stripConst(s string) string {
+	// It's possible for us to see a type with a top-level const here,
+	// which will give us an unusable struct type. See #75751.
+	// The top-level const will always appear as a final qualifier,
+	// constructed by typeConv.loadType in the dwarf.QualType case.
+	// The top-level const is meaningless here and can simply be removed.
+	i := strings.LastIndex(s, "const")
+	if i == -1 {
+		return s
+	}
+
+	// A top-level const can only be followed by other qualifiers.
+	if r, ok := strings.CutSuffix(s, "const"); ok {
+		return strings.TrimSpace(r)
+	}
+
+	var nonConst []string
+	for _, f := range strings.Fields(s[i:]) {
+		switch f {
+		case "const":
+		case "restrict", "volatile":
+			nonConst = append(nonConst, f)
+		default:
+			return s
+		}
+	}
+
+	return strings.TrimSpace(s[:i]) + " " + strings.Join(nonConst, " ")
+}
+
 // Construct a gcc struct matching the gc argument frame.
 // Assumes that in gcc, char is 1 byte, short 2 bytes, int 4 bytes, long long 8 bytes.
 // These assumptions are checked by the gccProlog.
 // Also assumes that gc convention is to word-align the
 // input and output parameters.
 func (p *Package) structType(n *Name) (string, int64) {
-	// It's possible for us to see a type with a top-level const here,
-	// which will give us an unusable struct type. See #75751.
-	// The top-level const will always appear as a final qualifier,
-	// constructed by typeConv.loadType in the dwarf.QualType case.
-	// The top-level const is meaningless here and can simply be removed.
-	stripConst := func(s string) string {
-		i := strings.LastIndex(s, "const")
-		if i == -1 {
-			return s
-		}
-
-		// A top-level const can only be followed by other qualifiers.
-		if r, ok := strings.CutSuffix(s, "const"); ok {
-			return strings.TrimSpace(r)
-		}
-
-		var nonConst []string
-		for _, f := range strings.Fields(s[i:]) {
-			switch f {
-			case "const":
-			case "restrict", "volatile":
-				nonConst = append(nonConst, f)
-			default:
-				return s
-			}
-		}
-
-		return strings.TrimSpace(s[:i]) + " " + strings.Join(nonConst, " ")
-	}
-
 	var buf strings.Builder
 	fmt.Fprint(&buf, "struct {\n")
 	off := int64(0)
@@ -499,10 +502,7 @@ func (p *Package) structType(n *Name) (string, int64) {
 			fmt.Fprintf(&buf, "\t\tchar __pad%d[%d];\n", off, pad)
 			off += pad
 		}
-		c := t.Typedef
-		if c == "" {
-			c = stripConst(t.C.String())
-		}
+		c := p.cgoFrameType(t)
 		fmt.Fprintf(&buf, "\t\t%s p%d;\n", c, i)
 		off += t.Size
 	}
@@ -517,7 +517,8 @@ func (p *Package) structType(n *Name) (string, int64) {
 			fmt.Fprintf(&buf, "\t\tchar __pad%d[%d];\n", off, pad)
 			off += pad
 		}
-		fmt.Fprintf(&buf, "\t\t%s r;\n", stripConst(t.C.String()))
+		c := p.cgoFrameType(t)
+		fmt.Fprintf(&buf, "\t\t%s r;\n", c)
 		off += t.Size
 	}
 	if off%p.PtrSize != 0 {
@@ -530,6 +531,114 @@ func (p *Package) structType(n *Name) (string, int64) {
 	}
 	fmt.Fprintf(&buf, "\t}")
 	return buf.String(), off
+}
+
+func (p *Package) cgoFrameType(t *Type) string {
+	if p.CPtrSize == p.PtrSize {
+		if t.Typedef != "" {
+			return t.Typedef
+		}
+		return stripConst(t.C.String())
+	}
+	if t.CgoPointer {
+		return "uint64_t"
+	}
+	if t.CgoArray != nil {
+		return fmt.Sprintf("__typeof__(%s[%d])", p.cgoFrameType(t.CgoArray.Elem), t.CgoArray.Count)
+	}
+	if t.CgoStruct == nil {
+		if t.Typedef != "" {
+			return t.Typedef
+		}
+		return stripConst(t.C.String())
+	}
+	var buf strings.Builder
+	buf.WriteString("struct { ")
+	off := int64(0)
+	for _, f := range t.CgoStruct.Fields {
+		aligned := (off + f.Type.Align - 1) &^ (f.Type.Align - 1)
+		if aligned > off {
+			fmt.Fprintf(&buf, "char __pad%d[%d]; ", off, aligned-off)
+		}
+		fmt.Fprintf(&buf, "%s %s; ", p.cgoFrameType(f.Type), f.GoName)
+		off = aligned + f.Type.Size
+	}
+	if t.Size > off {
+		fmt.Fprintf(&buf, "char __pad%d[%d]; ", off, t.Size-off)
+	}
+	buf.WriteByte('}')
+	return buf.String()
+}
+
+func cgoPointerCastType(t *Type) string {
+	if t.Typedef != "" {
+		return t.Typedef
+	}
+	return t.C.String()
+}
+
+func (p *Package) writeCgoPointerChecks(w io.Writer, access string, t *Type) {
+	if t.CgoPointer {
+		fmt.Fprintf(w, "\tif (%s > UINTPTR_MAX) __builtin_trap();\n", access)
+		return
+	}
+	if t.CgoStruct != nil {
+		for _, f := range t.CgoStruct.Fields {
+			p.writeCgoPointerChecks(w, access+"."+f.GoName, f.Type)
+		}
+		return
+	}
+	if t.CgoArray != nil {
+		for i := int64(0); i < t.CgoArray.Count; i++ {
+			p.writeCgoPointerChecks(w, fmt.Sprintf("%s[%d]", access, i), t.CgoArray.Elem)
+		}
+	}
+}
+
+func (p *Package) writeCgoStructToC(w io.Writer, dst, src string, t *Type) {
+	for _, f := range t.CgoStruct.Fields {
+		to := dst + "." + f.CName
+		from := src + "." + f.GoName
+		p.writeCgoValueToC(w, to, from, f.Type)
+	}
+}
+
+func (p *Package) writeCgoValueToC(w io.Writer, dst, src string, t *Type) {
+	switch {
+	case t.CgoPointer:
+		fmt.Fprintf(w, "\t%s = (%s)(uintptr_t)%s;\n", dst, cgoPointerCastType(t), src)
+	case t.CgoStruct != nil:
+		p.writeCgoStructToC(w, dst, src, t)
+	case t.CgoArray != nil:
+		for i := int64(0); i < t.CgoArray.Count; i++ {
+			p.writeCgoValueToC(w, fmt.Sprintf("%s[%d]", dst, i), fmt.Sprintf("%s[%d]", src, i), t.CgoArray.Elem)
+		}
+	default:
+		fmt.Fprintf(w, "\t%s = %s;\n", dst, src)
+	}
+}
+
+func (p *Package) writeCgoStructFromC(w io.Writer, dst, src string, t *Type) {
+	for _, f := range t.CgoStruct.Fields {
+		to := dst + "." + f.GoName
+		from := src + "." + f.CName
+		p.writeCgoValueFromC(w, to, from, f.Type)
+	}
+}
+
+func (p *Package) writeCgoValueFromC(w io.Writer, dst, src string, t *Type) {
+	switch {
+	case t.CgoPointer:
+		fmt.Fprintf(w, "\t%s = (uint64_t)(uintptr_t)%s;\n", dst, src)
+	case t.CgoStruct != nil:
+		p.writeCgoStructFromC(w, dst, src, t)
+	case t.CgoArray != nil:
+		for i := int64(0); i < t.CgoArray.Count; i++ {
+			p.writeCgoValueFromC(w, fmt.Sprintf("%s[%d]", dst, i), fmt.Sprintf("%s[%d]", src, i), t.CgoArray.Elem)
+		}
+	default:
+		fmt.Fprintf(w, "\t%s = %s;\n", dst, src)
+	}
 }
 
 func (p *Package) writeDefsFunc(fgo2 io.Writer, n *Name, callsMalloc *bool) {
@@ -773,7 +882,7 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 	// Gcc wrapper unpacks the C argument struct
 	// and calls the actual C function.
 	fmt.Fprintf(fgcc, "CGO_NO_SANITIZE_THREAD\n")
-	if n.AddError {
+	if n.AddError || goarch == "wasm" {
 		fmt.Fprintf(fgcc, "int\n")
 	} else {
 		fmt.Fprintf(fgcc, "void\n")
@@ -793,7 +902,20 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 	if tr != nil {
 		// Save the stack top for use below.
 		fmt.Fprintf(fgcc, "\tchar *_cgo_stktop = _cgo_topofstack();\n")
-		fmt.Fprintf(fgcc, "\t__typeof__(_cgo_a->r) _cgo_r;\n")
+		if (tr.CgoPointer || tr.CgoStruct != nil) && p.CPtrSize != p.PtrSize {
+			fmt.Fprintf(fgcc, "\t%s _cgo_r;\n", stripConst(tr.C.String()))
+		} else {
+			fmt.Fprintf(fgcc, "\t__typeof__(_cgo_a->r) _cgo_r;\n")
+		}
+	}
+	if p.CPtrSize != p.PtrSize {
+		for i, t := range n.FuncType.Params {
+			p.writeCgoPointerChecks(fgcc, fmt.Sprintf("_cgo_a->p%d", i), t)
+			if t.CgoStruct != nil {
+				fmt.Fprintf(fgcc, "\t%s _cgo_p%d = {0};\n", stripConst(t.C.String()), i)
+				p.writeCgoStructToC(fgcc, fmt.Sprintf("_cgo_p%d", i), fmt.Sprintf("_cgo_a->p%d", i), t)
+			}
+		}
 	}
 	fmt.Fprintf(fgcc, "\t_cgo_tsan_acquire();\n")
 	if n.AddError {
@@ -802,7 +924,7 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 	fmt.Fprintf(fgcc, "\t")
 	if tr != nil {
 		fmt.Fprintf(fgcc, "_cgo_r = ")
-		if c := tr.C.String(); c[len(c)-1] == '*' {
+		if c := tr.C.String(); c[len(c)-1] == '*' && !(tr.CgoPointer && p.CPtrSize != p.PtrSize) {
 			fmt.Fprint(fgcc, "(__typeof__(_cgo_a->r)) ")
 		}
 	}
@@ -814,7 +936,14 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 			if i > 0 {
 				fmt.Fprintf(fgcc, ", ")
 			}
-			fmt.Fprintf(fgcc, "_cgo_a->p%d", i)
+			t := n.FuncType.Params[i]
+			if t.CgoPointer && p.CPtrSize != p.PtrSize {
+				fmt.Fprintf(fgcc, "(%s)(uintptr_t)_cgo_a->p%d", cgoPointerCastType(t), i)
+			} else if t.CgoStruct != nil && p.CPtrSize != p.PtrSize {
+				fmt.Fprintf(fgcc, "_cgo_p%d", i)
+			} else {
+				fmt.Fprintf(fgcc, "_cgo_a->p%d", i)
+			}
 		}
 		fmt.Fprintf(fgcc, ");\n")
 	}
@@ -827,7 +956,13 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 		// Adjust the return value pointer appropriately.
 		fmt.Fprintf(fgcc, "\t_cgo_a = (void*)((char*)_cgo_a + (_cgo_topofstack() - _cgo_stktop));\n")
 		// Save the return value.
-		fmt.Fprintf(fgcc, "\t_cgo_a->r = _cgo_r;\n")
+		if tr.CgoPointer && p.CPtrSize != p.PtrSize {
+			fmt.Fprintf(fgcc, "\t_cgo_a->r = (uint64_t)(uintptr_t)_cgo_r;\n")
+		} else if tr.CgoStruct != nil && p.CPtrSize != p.PtrSize {
+			p.writeCgoStructFromC(fgcc, "_cgo_a->r", "_cgo_r", tr)
+		} else {
+			fmt.Fprintf(fgcc, "\t_cgo_a->r = _cgo_r;\n")
+		}
 		// The return value is on the Go stack. If we are using msan,
 		// and if the C value is partially or completely uninitialized,
 		// the assignment will mark the Go stack as uninitialized.
@@ -841,6 +976,11 @@ func (p *Package) writeOutputFunc(fgcc *os.File, n *Name) {
 	}
 	if n.AddError {
 		fmt.Fprintf(fgcc, "\treturn _cgo_errno;\n")
+	} else if goarch == "wasm" {
+		// WebAssembly validates indirect-call signatures exactly. Keep all
+		// wrappers called by runtime.asmcgocall on its int(void*) ABI even
+		// when the wrapped C function does not report errno.
+		fmt.Fprintf(fgcc, "\treturn 0;\n")
 	}
 	fmt.Fprintf(fgcc, "}\n")
 	fmt.Fprintf(fgcc, "\n")
@@ -995,7 +1135,7 @@ func (p *Package) writeExports(fgo2, fm, fgcc, fgcch io.Writer) {
 				off += pad
 				npad++
 			}
-			fmt.Fprintf(&ctype, "\t\t%s %s;\n", t.C, name)
+			fmt.Fprintf(&ctype, "\t\t%s %s;\n", p.cgoFrameType(t), name)
 			fmt.Fprintf(gotype, "\t\t%s ", name)
 			noSourceConf.Fprint(gotype, fset, typ)
 			fmt.Fprintf(gotype, "\n")
@@ -1100,11 +1240,11 @@ func (p *Package) writeExports(fgo2, fm, fgcc, fgcch io.Writer) {
 			fmt.Fprintf(fgcc, "\t%s r;\n", gccResult)
 		}
 		if fn.Recv != nil {
-			fmt.Fprintf(fgcc, "\t_cgo_a.recv = recv;\n")
+			p.writeCgoValueFromC(fgcc, "_cgo_a.recv", "recv", p.cgoType(fn.Recv.List[0].Type))
 		}
 		forFieldList(fntype.Params,
 			func(i int, aname string, atype ast.Expr) {
-				fmt.Fprintf(fgcc, "\t_cgo_a.p%d = %s;\n", i, exportParamName(aname, i))
+				p.writeCgoValueFromC(fgcc, fmt.Sprintf("_cgo_a.p%d", i), exportParamName(aname, i), p.cgoType(atype))
 			})
 		fmt.Fprintf(fgcc, "\t_cgo_tsan_release();\n")
 		fmt.Fprintf(fgcc, "\tcrosscall2(_cgoexp%s_%s, &_cgo_a, %d, _cgo_ctxt);\n", cPrefix, exp.ExpName, off)
@@ -1112,11 +1252,21 @@ func (p *Package) writeExports(fgo2, fm, fgcc, fgcch io.Writer) {
 		fmt.Fprintf(fgcc, "\t_cgo_release_context(_cgo_ctxt);\n")
 		if gccResult != "void" {
 			if len(fntype.Results.List) == 1 && len(fntype.Results.List[0].Names) <= 1 {
-				fmt.Fprintf(fgcc, "\treturn _cgo_a.r0;\n")
+				t := p.cgoType(fntype.Results.List[0].Type)
+				if p.CPtrSize != p.PtrSize && (t.CgoPointer || t.CgoStruct != nil || t.CgoArray != nil) {
+					fmt.Fprintf(fgcc, "\t%s _cgo_r = {0};\n", gccResult)
+					p.writeCgoPointerChecks(fgcc, "_cgo_a.r0", t)
+					p.writeCgoValueToC(fgcc, "_cgo_r", "_cgo_a.r0", t)
+					fmt.Fprintf(fgcc, "\treturn _cgo_r;\n")
+				} else {
+					fmt.Fprintf(fgcc, "\treturn _cgo_a.r0;\n")
+				}
 			} else {
 				forFieldList(fntype.Results,
 					func(i int, aname string, atype ast.Expr) {
-						fmt.Fprintf(fgcc, "\tr.r%d = _cgo_a.r%d;\n", i, i)
+						t := p.cgoType(atype)
+						p.writeCgoPointerChecks(fgcc, fmt.Sprintf("_cgo_a.r%d", i), t)
+						p.writeCgoValueToC(fgcc, fmt.Sprintf("r.r%d", i), fmt.Sprintf("_cgo_a.r%d", i), t)
 					})
 				fmt.Fprintf(fgcc, "\treturn r;\n")
 			}
@@ -1484,7 +1634,7 @@ func (p *Package) doCgoType(e ast.Expr, m map[ast.Expr]bool) *Type {
 	switch t := e.(type) {
 	case *ast.StarExpr:
 		x := p.doCgoType(t.X, m)
-		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("%s*", x.C)}
+		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("%s*", x.C), CgoPointer: p.CPtrSize != p.PtrSize}
 	case *ast.ArrayType:
 		if t.Len == nil {
 			// Slice: pointer, len, cap.
@@ -1494,13 +1644,13 @@ func (p *Package) doCgoType(e ast.Expr, m map[ast.Expr]bool) *Type {
 	case *ast.StructType:
 		// Not supported.
 	case *ast.FuncType:
-		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("void*")}
+		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("void*"), CgoPointer: p.CPtrSize != p.PtrSize}
 	case *ast.InterfaceType:
 		return &Type{Size: 2 * p.PtrSize, Align: p.PtrSize, C: c("GoInterface")}
 	case *ast.MapType:
-		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("GoMap")}
+		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("GoMap"), CgoPointer: p.CPtrSize != p.PtrSize}
 	case *ast.ChanType:
-		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("GoChan")}
+		return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("GoChan"), CgoPointer: p.CPtrSize != p.PtrSize}
 	case *ast.Ident:
 		goTypesFixup := func(r *Type) *Type {
 			if r.Size == 0 { // int or uint
@@ -1572,7 +1722,7 @@ func (p *Package) doCgoType(e ast.Expr, m map[ast.Expr]bool) *Type {
 	case *ast.SelectorExpr:
 		id, ok := t.X.(*ast.Ident)
 		if ok && id.Name == "unsafe" && t.Sel.Name == "Pointer" {
-			return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("void*")}
+			return &Type{Size: p.PtrSize, Align: p.PtrSize, C: c("void*"), CgoPointer: p.CPtrSize != p.PtrSize}
 		}
 	}
 	error_(e.Pos(), "Go type not supported in export: %s", gofmt(e))
@@ -1884,21 +2034,46 @@ func _cgo_cmalloc(p0 uint64) (r1 unsafe.Pointer) {
 // allocation of 0 bytes.
 const cMallocDefC = `
 CGO_NO_SANITIZE_THREAD
-void _cgoPREFIX_Cfunc__Cmalloc(void *v) {
+CGOWRAPPERRET _cgoPREFIX_Cfunc__Cmalloc(void *v) {
 	struct {
 		unsigned long long p0;
-		void *r1;
+		CGOFRAMERESULT r1;
 	} PACKED *a = v;
 	void *ret;
+	if (a->p0 > SIZE_MAX) __builtin_trap();
 	_cgo_tsan_acquire();
 	ret = malloc(a->p0);
 	if (ret == NULL && a->p0 == 0) {
 		ret = malloc(1);
 	}
-	a->r1 = ret;
+	CGOSTORERESULT
 	_cgo_tsan_release();
+CGOWRAPPERRETURN
 }
 `
+
+func (p *Package) cMallocDefC() string {
+	wrapperRet := "void"
+	wrapperReturn := ""
+	frameResult := "void *"
+	storeResult := "a->r1 = ret;"
+	if goarch == "wasm" {
+		wrapperRet = "int"
+		wrapperReturn = "\treturn 0;"
+		if p.CPtrSize != p.PtrSize {
+			frameResult = "uint64_t"
+			storeResult = "a->r1 = (uint64_t)(uintptr_t)ret;"
+		}
+	}
+	return strings.NewReplacer(
+		"PREFIX", cPrefix,
+		"PACKED", p.packedAttribute(),
+		"CGOWRAPPERRETURN", wrapperReturn,
+		"CGOWRAPPERRET", wrapperRet,
+		"CGOFRAMERESULT", frameResult,
+		"CGOSTORERESULT", storeResult,
+	).Replace(cMallocDefC)
+}
 
 func (p *Package) cPrologGccgo() string {
 	r := strings.NewReplacer(

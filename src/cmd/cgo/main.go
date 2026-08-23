@@ -161,6 +161,26 @@ type Type struct {
 	EnumValues map[string]int64
 	Typedef    string
 	BadPointer bool // this pointer type should be represented as a uintptr (deprecated)
+	CgoPointer bool // C pointer represented in a Go-pointer-width frame slot
+	CgoStruct  *CgoStruct
+	CgoArray   *CgoArray
+}
+
+type CgoArray struct {
+	Elem  *Type
+	Count int64
+}
+
+// CgoStruct describes a C aggregate whose Go representation has a different
+// layout because one or more C pointers occupy Go-pointer-width slots.
+type CgoStruct struct {
+	Fields []CgoStructField
+}
+
+type CgoStructField struct {
+	CName  string
+	GoName string
+	Type   *Type
 }
 
 func (t *Type) fuzzyMatch(t2 *Type) bool {

@@ -82,6 +82,14 @@ func (d *deadcodePass) init() {
 	// runtime.unreachableMethod is a function that will throw if called.
 	// We redirect unreachable methods to it.
 	names = append(names, "runtime.unreachableMethod")
+	if buildcfg.GOOS == "linux" && buildcfg.GOARCH == "wasm" {
+		if start := d.ldr.Lookup("_start", 0); start != 0 && d.ldr.SymType(start).IsText() {
+			// Static cgo uses musl's start routine. The final exported wrapper
+			// that calls it is synthesized after deadcode, so make the native
+			// start graph an explicit root here.
+			names = append(names, "_start")
+		}
+	}
 	if d.ctxt.BuildMode == BuildModePlugin {
 		names = append(names, objabi.PathToPrefix(*flagPluginPath)+"..inittask", objabi.PathToPrefix(*flagPluginPath)+".main", "go:plugin.tabs")
 

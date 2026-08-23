@@ -31,6 +31,19 @@ struct G
  * Also known to ../pkg/runtime/runtime.h.
  */
 typedef struct ThreadStart ThreadStart;
+
+// Functions passed to runtime.asmcgocall traditionally use a mixture of
+// void(void*) and int(void*) signatures. Register ABIs tolerate that because
+// an ignored return register needs no special handling. WebAssembly validates
+// indirect-call signatures exactly, so use the runtime's int(void*) contract
+// consistently there.
+#ifdef __wasm__
+#define CGO_ASMCGOCALL_RETURN_TYPE int
+#define CGO_ASMCGOCALL_RETURN return 0
+#else
+#define CGO_ASMCGOCALL_RETURN_TYPE void
+#define CGO_ASMCGOCALL_RETURN return
+#endif
 struct ThreadStart
 {
 	G *g;
@@ -71,7 +84,7 @@ uintptr_t _cgo_wait_runtime_init_done(void);
 /*
  * Get the low and high boundaries of the stack.
  */
-void x_cgo_getstackbound(uintptr bounds[2]);
+CGO_ASMCGOCALL_RETURN_TYPE x_cgo_getstackbound(uintptr bounds[2]);
 
 /*
  * Calls into the Go tool chain, where all registers are caller save.

@@ -63,6 +63,13 @@ var (
 //
 //go:nosplit
 func argv_index(argv **byte, i int32) *byte {
+	if GOOS == "linux" && GOARCH == "wasm" && iscgo {
+		// musl owns cgo startup and supplies a wasm32 pointer vector. Go
+		// pointers remain 64-bit, so read and zero-extend each C pointer
+		// instead of indexing argv using goarch.PtrSize.
+		p := *(*uint32)(add(unsafe.Pointer(argv), uintptr(i)*4))
+		return (*byte)(unsafe.Pointer(uintptr(p)))
+	}
 	return *(**byte)(add(unsafe.Pointer(argv), uintptr(i)*goarch.PtrSize))
 }
 

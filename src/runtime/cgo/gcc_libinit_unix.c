@@ -27,7 +27,12 @@ static int runtime_init_done;
 static pthread_key_t pthread_g;
 static void pthread_key_destructor(void* g);
 uintptr_t x_cgo_pthread_key_created;
+#ifdef __wasm__
+extern void crosscall2(void (*fn)(void *), void *, int, size_t);
+void (*x_crosscall2_ptr)(void (*fn)(void *), void *, int, size_t) = crosscall2;
+#else
 void (*x_crosscall2_ptr)(void (*fn)(void *), void *, int, size_t);
+#endif
 
 // The traceback function, used when tracing C calls.
 static void (*cgo_traceback_function)(struct cgoTracebackArg*);
@@ -85,28 +90,31 @@ _cgo_wait_runtime_init_done(void) {
 
 // Store the g into a thread-specific value associated with the pthread key pthread_g.
 // And pthread_key_destructor will dropm when the thread is exiting.
-void x_cgo_bindm(void* g) {
+CGO_ASMCGOCALL_RETURN_TYPE x_cgo_bindm(void* g) {
 	// We assume this will always succeed, otherwise, there might be extra M leaking,
 	// when a C thread exits after a cgo call.
 	// We only invoke this function once per thread in runtime.needAndBindM,
 	// and the next calls just reuse the bound m.
 	pthread_setspecific(pthread_g, g);
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_notify_runtime_init_done(void* dummy __attribute__ ((unused))) {
 	pthread_mutex_lock(&runtime_init_mu);
 	__atomic_store_n(&runtime_init_done, 1, __ATOMIC_RELEASE);
 	pthread_cond_broadcast(&runtime_init_cond);
 	pthread_mutex_unlock(&runtime_init_mu);
+	CGO_ASMCGOCALL_RETURN;
 }
 
 // Sets the traceback, context, and symbolizer functions. Called from
 // runtime.SetCgoTraceback.
-void x_cgo_set_traceback_functions(struct cgoSetTracebackFunctionsArg* arg) {
+CGO_ASMCGOCALL_RETURN_TYPE x_cgo_set_traceback_functions(struct cgoSetTracebackFunctionsArg* arg) {
 	__atomic_store_n(&cgo_traceback_function, arg->Traceback, __ATOMIC_RELEASE);
 	__atomic_store_n(&cgo_context_function, arg->Context, __ATOMIC_RELEASE);
 	__atomic_store_n(&cgo_symbolizer_function, arg->Symbolizer, __ATOMIC_RELEASE);
+	CGO_ASMCGOCALL_RETURN;
 }
 
 // Gets the traceback function to call to trace C calls.
@@ -126,17 +134,18 @@ void (*(_cgo_get_traceback_function(void)))(struct cgoTracebackArg*) {
 // The only purpose of this wrapper is to perform TSAN acquire/release.
 // Alternatively, if the runtime arranged to safely call TSAN acquire/release,
 // it could perform the call directly.
-void x_cgo_call_traceback_function(struct cgoTracebackArg* arg) {
+CGO_ASMCGOCALL_RETURN_TYPE x_cgo_call_traceback_function(struct cgoTracebackArg* arg) {
 	void (*pfn)(struct cgoTracebackArg*);
 
 	pfn = _cgo_get_traceback_function();
 	if (pfn == nil) {
-		return;
+		CGO_ASMCGOCALL_RETURN;
 	}
 
 	_cgo_tsan_acquire();
 	(*pfn)(arg);
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }
 
 // Gets the context function to call to record the traceback context
@@ -153,17 +162,18 @@ void (*(_cgo_get_symbolizer_function(void)))(struct cgoSymbolizerArg*) {
 // Call the symbolizer function registered with x_cgo_set_traceback_functions.
 //
 // See comment on x_cgo_call_traceback_function.
-void x_cgo_call_symbolizer_function(struct cgoSymbolizerArg* arg) {
+CGO_ASMCGOCALL_RETURN_TYPE x_cgo_call_symbolizer_function(struct cgoSymbolizerArg* arg) {
 	void (*pfn)(struct cgoSymbolizerArg*);
 
 	pfn = _cgo_get_symbolizer_function();
 	if (pfn == nil) {
-		return;
+		CGO_ASMCGOCALL_RETURN;
 	}
 
 	_cgo_tsan_acquire();
 	(*pfn)(arg);
 	_cgo_tsan_release();
+	CGO_ASMCGOCALL_RETURN;
 }
 
 static void
@@ -177,7 +187,7 @@ pthread_key_destructor(void* g) {
 	}
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 x_cgo_thread_start(ThreadStart *arg)
 {
 	ThreadStart *ts;
@@ -193,4 +203,5 @@ x_cgo_thread_start(ThreadStart *arg)
 	*ts = *arg;
 
 	_cgo_sys_thread_start(ts);	/* OS-dependent half */
+	CGO_ASMCGOCALL_RETURN;
 }

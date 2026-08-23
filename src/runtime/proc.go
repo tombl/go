@@ -2275,6 +2275,15 @@ type cgothreadstart struct {
 	fn  unsafe.Pointer
 }
 
+// cgothreadstartWasm is the exact memory32 layout consumed by libcgo.h.
+// Go pointers remain 64-bit on linux/wasm, so passing cgothreadstart directly
+// would make C read the upper half of g as tls and the low half of tls as fn.
+type cgothreadstartWasm struct {
+	g   uint32
+	tls uint32
+	fn  uint32
+}
+
 // Allocate a new m unassociated with any thread.
 // Can use p for allocation context if needed.
 // fn is recorded as the new m's m.mstartfn.
@@ -2923,6 +2932,19 @@ func newm(fn func(), pp *p, id int64) {
 
 func newm1(mp *m) {
 	if iscgo && _cgo_thread_start != nil {
+		if GOOS == "linux" && GOARCH == "wasm" {
+			g := uintptr(unsafe.Pointer(mp.g0))
+			tls := uintptr(unsafe.Pointer(&mp.tls[0]))
+			fn := abi.FuncPCABI0(mstart)
+			if uint64(g)>>32 != 0 || uint64(tls)>>32 != 0 || fn&0xffff != 0 || uint64(fn>>16)>>32 != 0 {
+				throw("cgo: linux/wasm pointer does not fit memory32 ABI")
+			}
+			ts := cgothreadstartWasm{g: uint32(g), tls: uint32(tls), fn: uint32(fn >> 16)}
+			execLock.rlock() // Prevent process clone.
+			asmcgocall(_cgo_thread_start, unsafe.Pointer(&ts))
+			execLock.runlock()
+			return
+		}
 		var ts cgothreadstart
 		ts.g.set(mp.g0)
 		ts.tls = (*uint64)(unsafe.Pointer(&mp.tls[0]))

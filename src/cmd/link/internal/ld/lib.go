@@ -1284,7 +1284,11 @@ func wasmPrelinkHostObjects(ctxt *Link) {
 
 	argv := append([]string{}, ctxt.extld()...)
 	argv = append(argv, hostlinkArchArgs(ctxt.Arch)...)
-	argv = append(argv, "-Wl,-r", "-o", output)
+	// The target driver enables section GC by default. It cannot see Go
+	// relocations while producing this native-only aggregate, so preserve
+	// bridge functions (such as the libc heap provider) that are referenced
+	// exclusively from Go data.
+	argv = append(argv, "-Wl,-r", "-Wl,--no-gc-sections", "-o", output)
 	argv = append(argv, paths...)
 	argv = append(argv, ldflag...)
 	argv = append(argv, flagExtldflags...)

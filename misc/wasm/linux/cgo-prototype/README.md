@@ -1,54 +1,35 @@
-# Static cgo prototype
+# Static cgo integration test
 
-This directory is the first `linux/wasm` static-cgo probe. It deliberately uses
-only fixed-width scalar arguments so the object and linker path can be tested
-independently of pointer marshalling.
+This directory is the executable `linux/wasm` static-cgo integration test. It
+uses the distro's `wasm32-unknown-linux-musl` Clang/sysroot and exercises the
+complete internal-link path:
 
-The prototype now establishes that:
+- musl crt1 owns startup, TLS, the process break, and `memory.grow`;
+- cmd/link ingests the relocatable WebAssembly selected by the C driver,
+  including native signatures, code/data/table/TLS relocations, constructors,
+  libc, pthread, and compiler-runtime archive members;
+- Go-to-C calls switch to `m.g0`, and C-to-Go callbacks can schedule, grow and
+  copy the goroutine stack, and return through the live C activation;
+- callbacks from C-created pthreads borrow and release a Go M while using the
+  new WebAssembly instance's private globals;
+- the strict indirect-call ABI consistently uses `int32(void*)`, returning
+  zero for ordinary wrappers and errno for two-result cgo calls;
+- Go pointers remain 64-bit while C pointers remain memory32. Generated call
+  and export wrappers check narrowing, zero-extend results, and marshal
+  pointers nested in structs and arrays field by field; and
+- libc allocation, direct pointers, `C.CBytes`/`C.GoBytes`, scalar and
+  aggregate parameters/results, function pointers, errno, scheduled callbacks,
+  and pthread-created callbacks all execute in one program.
 
-- the distro's Clang, targeted at `wasm32-unknown-linux-musl` with its sysroot,
-  compiles the cgo probes and C sources;
-- cmd/cgo can read DWARF from relocatable wasm custom sections and generate the
-  Go and C wrappers for `prototype_add32`;
-- Go values exposed to C need a 64-bit representation even though C pointers
-  are 32-bit; and
-- cmd/link can ingest generated relocatable wasm objects, retain their native
-  wasm signatures, and invoke the target C driver once at whole-program link
-  time with `-r`;
-- wasm-ld successfully selects the required crt1, static musl, pthread, and
-  compiler-runtime archive members while leaving Go bridge symbols unresolved;
-- the Go linker preserves the native `linux.syscall`, `linux.get_thread_area`,
-  and `linux.copy_siginfo` imports from the resulting object; and
-- C's `__tls_base` and Go's `g` register can be independent globals in each
-  WebAssembly instance.
+The emitted module is validated with the threads and exception features and
+has passed the distro VM with 1, 2, and 4 virtual CPUs. The test deliberately
+forces callback stack growth and scheduler handoffs so a scalar-only success
+cannot mask an invalid stack-switch implementation.
 
-The build is deliberately kept on Go's internal-link path. linux/wasm is
-static-only, so cmd/go skips its dynamic-import probe and cmd/link treats wasm
-host objects from every cgo package as internal objects. New serialized Go
-relocation kinds are appended to the existing enumeration so old Go object
-files retain their numeric ABI.
+The build remains static and on Go's internal-link path. Dynamic libraries,
+plugins, PIE, the race detector, fork, and asynchronous preemption are outside
+the target platform contract. C `longjmp` or an exception must not cross a Go
+frame.
 
-The current boundary is now explicit rather than archive-resolution failure:
-
-- wasm's existing `runtime.asmcgocall`, `crosscall2`, and C-to-Go entry stubs
-  are `UNDEF`, and a C call cannot target Go's `(i32) -> i32` continuation ABI
-  directly; it needs a native wasm-signature adapter;
-- the Go linker must synthesize `__wasm_init_tls`, init/fini array boundaries,
-  constructor dispatch, and the C-owned startup handoff;
-- relocations inside C data segments and the remaining archive relocation
-  families must be applied for initialized function pointers and globals;
-- non-empty C TLS segments still need final layout and TLS-relative
-  relocations (the per-instance base global is already modeled); and
-- the cgo runtime allocator must request aligned regions from libc instead of
-  directly executing `memory.grow`;
-- the emitted module must pass feature-enabled wasm validation before it is
-  run in the distro VM.
-
-`linkprobe/native_stubs.c` is deliberately not part of the Go package. It
-supplies temporary bridge symbols so the native half can be finalized and run
-independently. The probe has passed the distro's real two-CPU VM while creating
-four pthreads, checking zero-initialized per-instance C TLS, concurrently
-allocating and freeing memory through musl, and updating a shared wasm atomic.
-
-See [DESIGN.md](DESIGN.md) for the decisions and remaining implementation
-sequence.
+See [DESIGN.md](DESIGN.md) for the fixed ownership/ABI decisions and remaining
+validation work.

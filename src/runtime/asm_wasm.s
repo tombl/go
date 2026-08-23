@@ -14,6 +14,9 @@ TEXT runtime·rt0_go(SB), NOSPLIT|NOFRAME|TOPFRAME, $0
 	MOVD $runtime·m0(SB), runtime·g0+g_m(SB)
 	// set g to g0
 	MOVD $runtime·g0(SB), g
+#ifdef GOOS_linux
+	CALLNORESUME runtime·cgoInitWasm(SB)
+#endif
 	CALLNORESUME runtime·check(SB)
 #ifdef GOOS_js
 	CALLNORESUME runtime·args(SB)
@@ -275,8 +278,172 @@ TEXT runtime·morestack_noctxt(SB),NOSPLIT,$0
 	MOVD $0, CTXT
 	JMP runtime·morestack(SB)
 
-TEXT ·asmcgocall(SB), NOSPLIT, $0-0
-	UNDEF
+// func asmcgocall(fn, arg unsafe.Pointer) int32
+// Native cgo wrappers all use the wasm signature int32(void*). Function
+// pointers in Go carry the continuation PC encoding, so shift to the table
+// index before the indirect call. C pointers are memory32 values: trapping on
+// a non-zero high half prevents an unsafe forged pointer from aliasing an
+// unrelated low address after truncation.
+//
+// C runs on m.g0, like it does on the register architectures. In addition to
+// keeping C frames out of a movable goroutine stack, this leaves curg.sched as
+// the stable return point used by a C-to-Go callback. The saved stack depth,
+// rather than the absolute SP, remains valid if a callback grows curg's stack.
+TEXT ·asmcgocall(SB), NOSPLIT, $0-20
+	I64Load fn+0(FP)
+	I64Const $16
+	I64ShrU
+	Set R0
+
+	I64Load arg+8(FP)
+	Tee R1
+	I64Const $32
+	I64ShrU
+	I64Eqz
+	If
+		MOVD g_m(g), R2
+		MOVD m_g0(R2), R3
+		Get g
+		Get R3
+		I64Eq
+		If
+			// Already on a system stack (for example while creating an M).
+			Get R1
+			I32WrapI64
+			Get R0
+			I32WrapI64
+			CallIndirect $0 // native int32(void*)
+			I64ExtendI32S
+			Set R7
+		Else
+			MOVD g, R4
+
+			// Make curg.sched describe the suspended Go call. The PC is a
+			// traceback sentinel; execution resumes through this function's
+			// live Wasm activation after the native call returns.
+			MOVD $runtime·systemstack_switch(SB), g_sched+gobuf_pc(R4)
+			Get SP
+			I64ExtendI32U
+			Set R6
+			MOVD R6, g_sched+gobuf_sp(R4)
+
+			// Preserve the location within curg rather than its absolute SP.
+			MOVD g_stack+stack_hi(R4), R5
+			Get R5
+			Get SP
+			I64ExtendI32U
+			I64Sub
+			Set R5
+
+			// Switch to g0 and leave a small, naturally aligned save area.
+			MOVD g_sched+gobuf_sp(R3), R6
+			Get R6
+			I32WrapI64
+			I32Const $16
+			I32Sub
+			Set SP
+			MOVD R4, 0(SP)
+			MOVD R5, 8(SP)
+			MOVD R3, g
+
+			Get R1
+			I32WrapI64
+			Get R0
+			I32WrapI64
+			CallIndirect $0 // native int32(void*)
+			I64ExtendI32S
+			Set R7
+
+			// A callback may have moved curg's stack. Recover SP from the
+			// saved depth, then restore the instance-local g register.
+			MOVD 0(SP), R4
+			MOVD 8(SP), R5
+			MOVD g_stack+stack_hi(R4), R6
+			Get R6
+			Get R5
+			I64Sub
+			I32WrapI64
+			Set SP
+			MOVD R4, g
+		End
+	Else
+		UNDEF
+	End
+
+	MOVW R7, ret+16(FP)
+	RET
+
+// Called from native cgo wrappers. This follows the C ABI directly rather
+// than Go's continuation ABI; its wasm result is the current goroutine stack
+// high address.
+TEXT _cgo_topofstack(SB), NOSPLIT|NOFRAME, $0
+	Get g
+	I32WrapI64
+	I64Load $g_m
+	I32WrapI64
+	I64Load $m_curg
+	I32WrapI64
+	I64Load $(g_stack+stack_hi)
+	I32WrapI64
+	Return
+
+// void crosscall1(void (*fn)(void), void (*setg)(void*), void *g)
+// R0, R1, and R2 are the three native wasm parameters. setg has the common
+// cgo wrapper type at index 1; fn is a Go continuation function at index 0.
+TEXT crosscall1(SB), NOSPLIT|NOFRAME, $0
+	Get R2
+	Get R1
+	CallIndirect $1
+	I32Const $0
+	Get R0
+	CallIndirect $0
+	Drop
+	// A Go continuation returns 1 when a stack switch unwinds the native
+	// WebAssembly call stack. Resume from the PC saved on the linear Go stack
+	// just as the module entry wrapper does.
+	Call wasm_pc_f_loop(SB)
+	Return
+
+// void setg_gcc(void *g). Each pthread is a separate WebAssembly instance,
+// so assigning the instance-local g global is the TLS operation Go needs.
+TEXT runtime·wasmSetgGCC(SB), NOSPLIT|NOFRAME, $0
+	Get R0
+	I64ExtendI32U
+	Set g
+	Return
+
+// func setg(gg *g). Go's TLS is the instance-local g global on wasm.
+TEXT runtime·setg(SB), NOSPLIT, $0-8
+	MOVD gg+0(FP), g
+	RET
+
+// func wasmCgoInit(fn, gp, setg unsafe.Pointer)
+TEXT runtime·wasmCgoInit(SB), NOSPLIT, $0-24
+	I64Load gp+8(FP)
+	Tee R0
+	I64Const $32
+	I64ShrU
+	I64Eqz
+	If
+	Else
+		UNDEF
+	End
+	Get R0
+	I32WrapI64
+
+	I64Load setg+16(FP)
+	I64Const $16
+	I64ShrU
+	I32WrapI64
+	I32Const $0
+	I32Const $0
+
+	I64Load fn+0(FP)
+	I64Const $16
+	I64ShrU
+	I32WrapI64
+	CallIndirect $2 // native void(void*, void (*)(void*), void**, void**)
+	RET
 
 #define DISPATCH(NAME, MAXSIZE) \
 	Get R0; \
@@ -418,8 +585,100 @@ TEXT runtime·goexit(SB), NOSPLIT|TOPFRAME, $0-0
 	CALL runtime·goexit1(SB) // does not return
 	UNDEF
 
-TEXT runtime·cgocallback(SB), NOSPLIT, $0-24
-	UNDEF
+// func cgocallback(fn, frame, ctxt uintptr)
+//
+// Entry is on m.g0 through the native crosscall2 wasm export. Move onto
+// m.curg for cgocallbackg, preserving both goroutines' scheduler state. The
+// ordinary Go CALL below is deliberately used after the manual stack switch:
+// its continuation machinery lets exitsyscall or the callback itself schedule
+// and later resume at the matching PC on the linear Go stack.
+TEXT runtime·cgocallback(SB), NOSPLIT, $24-24
+	NO_LOCAL_POINTERS
+
+	// A nil function is the pthread-key destructor path. Restore the g saved
+	// by cgoBindM, return the borrowed M to the extra list, and leave g nil.
+	MOVD fn+0(FP), R0
+	Get R0
+	I64Eqz
+	If
+		MOVD frame+8(FP), R1
+		MOVD R1, g
+		CALLNORESUME runtime·dropm(SB)
+		RET
+	End
+
+	// A callback from a C-created pthread enters a fresh Wasm instance whose
+	// g global is zero. Borrow and bind an extra M before dereferencing g. Both
+	// this assembly entry and the wasmexport wrapper are nosplit, so they can
+	// safely execute on the native pthread stack until needAndBindM installs
+	// accurate temporary g0 bounds.
+	Get g
+	I64Eqz
+	If
+		CALLNORESUME runtime·needAndBindM(SB)
+	End
+
+	MOVD g_m(g), R0
+	MOVD m_g0(R0), R1
+	MOVD m_curg(R0), R2
+
+	// Save the previous g0 scheduler SP where unwindm expects it. Keep this
+	// word below the active frame: 0(SP)..24(SP) is the outgoing argument
+	// area for cgocallbackg on wasm's stack ABI.
+	MOVD g_sched+gobuf_sp(R1), R3
+	Get SP
+	I32Const $8
+	I32Sub
+	I64ExtendI32U
+	Set R7
+	MOVD R3, 0(R7)
+	MOVD R7, g_sched+gobuf_sp(R1)
+
+	// Open an argument frame below curg.sched.sp. The final word preserves
+	// curg.sched.pc while the callback temporarily owns curg.
+	// Capture the incoming arguments before changing SP: FP-relative wasm
+	// operands are derived from the live linear stack pointer.
+	MOVD fn+0(FP), R4
+	MOVD frame+8(FP), R5
+	MOVD ctxt+16(FP), R6
+	MOVD g_sched+gobuf_sp(R2), R3
+	Get R3
+	I32WrapI64
+	I32Const $32
+	I32Sub
+	Set SP
+	MOVD g_sched+gobuf_pc(R2), R7
+	MOVD R7, 24(SP)
+	MOVD R4, 0(SP)
+	MOVD R5, 8(SP)
+	MOVD R6, 16(SP)
+	MOVD R2, g
+
+	CALL runtime·cgocallbackg(SB)
+
+	// Restore curg.sched before returning to the suspended C activation.
+	MOVD 24(SP), R0
+	MOVD R0, g_sched+gobuf_pc(g)
+	Get SP
+	I32Const $32
+	I32Add
+	I64ExtendI32U
+	Set R0
+	MOVD R0, g_sched+gobuf_sp(g)
+
+	// Return to g0 and restore the scheduler SP saved at callback entry.
+	MOVD g_m(g), R0
+	MOVD m_g0(R0), R1
+	MOVD R1, g
+	MOVD g_sched+gobuf_sp(R1), R2
+	MOVD 0(R2), R3
+	MOVD R3, g_sched+gobuf_sp(g)
+	Get R2
+	I32WrapI64
+	I32Const $8
+	I32Add
+	Set SP
+	RET
 
 // gcWriteBarrier informs the GC about heap pointer writes.
 //

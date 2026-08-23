@@ -15,6 +15,35 @@ TEXT _rt0_wasm_linux(SB),NOSPLIT,$0
 
 	Return
 
+// __main_argc_argv_envp is the native wasm32 entry point expected by musl's
+// crt startup. musl has already initialized libc, TLS, and constructors before
+// reaching this adapter. sysargs performs the wasm32-to-Go pointer-vector
+// conversion, so the native argc/argv/envp parameters are intentionally not
+// copied into the 64-bit Go ABI frame here.
+TEXT __main_argc_argv_envp(SB),NOSPLIT,$0
+	MOVD $runtime·wasmStack+(m0Stack__size-16)(SB), SP
+
+	// Preserve musl's wasm32 argc/argv in the ordinary Go startup frame.
+	// sysargs recognizes cgo startup and reads the 32-bit vector without
+	// asking the kernel to provide the process-argument blob a second time.
+	Get SP
+	Get R0
+	I64ExtendI32U
+	I64Store $0
+	Get SP
+	Get R1
+	I64ExtendI32U
+	I64Store $8
+
+	I32Const $0 // entry PC_B
+	Call runtime·rt0_go(SB)
+	Drop
+	Call wasm_pc_f_loop(SB)
+
+	// The Go scheduler does not return, but musl's main hook has an int result.
+	I32Const $0
+	Return
+
 // wasmMstart is called by the kernel's callback-based clone syscall. Each
 // worker has its own WebAssembly globals, so initialize SP and g from mp
 // before entering the ordinary Go M startup path.
