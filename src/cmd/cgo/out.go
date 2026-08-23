@@ -188,14 +188,10 @@ func (p *Package) writeDefs() {
 				// to avoid type conflict errors from LTO
 				// (Link Time Optimization).
 				if wasmFPVar {
-					// A Go function address is its continuation PC (PC_F<<16),
-					// whereas the wasm C ABI represents a function pointer as a
-					// raw __indirect_function_table index. Materialize the C
-					// function pointer in native data so the object writer emits a
-					// TABLE_INDEX_I32 relocation, then widen its value in Go below.
-					// Taking &__cgo_name directly would silently pass PC_F<<16 to C.
-					fmt.Fprintf(fm, "extern void %s(void);\n", n.C)
-					fmt.Fprintf(fm, "void (*_cgo_fp_%s)(void) = (void (*)(void))%s;\n", n.C, n.C)
+					// The function pointer cell is emitted by writeOutput in a
+					// per-source C object. _cgo_main.c is not part of linux/wasm
+					// links, so defining it here would leave the imported symbol
+					// backed by zero-initialized Go data instead.
 				} else if n.Kind == "fpvar" {
 					fmt.Fprintf(fm, "extern void %s();\n", n.C)
 				} else {
@@ -855,6 +851,20 @@ func (p *Package) writeOutput(f *File, srcfile string) {
 
 	for _, key := range nameKeys(f.Name) {
 		n := f.Name[key]
+		if goarch == "wasm" && n.Kind == "fpvar" {
+			written := "wasm-fpvar:" + n.C
+			if !p.Written[written] {
+				p.Written[written] = true
+				// A Go function address is its continuation PC (PC_F<<16),
+				// whereas the wasm C ABI represents a function pointer as a
+				// raw __indirect_function_table index. Materialize the exact C
+				// function pointer type in native data so the object writer emits
+				// a TABLE_INDEX_I32 relocation, then widen its value in Go.
+				// This object includes the source preamble, so the declaration is
+				// available and the cell participates in the final linux/wasm link.
+				fmt.Fprintf(fgcc, "__typeof__(&%s) _cgo_fp_%s = &%s;\n", n.C, n.C, n.C)
+			}
+		}
 		if n.FuncType != nil {
 			p.writeOutputFunc(fgcc, n)
 		}
