@@ -38,8 +38,9 @@ import (
 type Package struct {
 	PackageName string // name of package
 	PackagePath string
-	PtrSize     int64
-	IntSize     int64
+	PtrSize     int64 // Go pointer size
+	IntSize     int64 // Go int size
+	CPtrSize    int64 // C pointer size; it may differ from PtrSize
 	GccOptions  []string
 	GccIsClang  bool
 	LdFlags     []string // #cgo LDFLAGS
@@ -224,6 +225,7 @@ var ptrSizeMap = map[string]int64{
 	"shbe":     4,
 	"sparc":    4,
 	"sparc64":  8,
+	"wasm":     8,
 }
 
 var intSizeMap = map[string]int64{
@@ -250,6 +252,7 @@ var intSizeMap = map[string]int64{
 	"shbe":     4,
 	"sparc":    4,
 	"sparc64":  8,
+	"wasm":     8,
 }
 
 var cPrefix string
@@ -435,7 +438,7 @@ func main() {
 			f.Edit = edit.NewBuffer(b)
 			f.ParseGo(input, b)
 			f.ProcessCgoDirectives()
-			gccIsClang := f.loadDefines(p.GccOptions)
+			gccIsClang := f.loadDefines(p, p.GccOptions)
 			once.Do(func() {
 				p.GccIsClang = gccIsClang
 			})
@@ -525,6 +528,10 @@ func newPackage(args []string) *Package {
 	if intSize == 0 {
 		fatalf("unknown intSize for $GOARCH %q", goarch)
 	}
+	cPtrSize := ptrSize
+	if goarch == "wasm" {
+		cPtrSize = 4
+	}
 
 	// Reset locale variables so gcc emits English errors [sic].
 	os.Setenv("LANG", "en_US.UTF-8")
@@ -533,6 +540,7 @@ func newPackage(args []string) *Package {
 	p := &Package{
 		PtrSize:     ptrSize,
 		IntSize:     intSize,
+		CPtrSize:    cPtrSize,
 		Written:     make(map[string]bool),
 		noCallbacks: make(map[string]bool),
 		noEscapes:   make(map[string]bool),

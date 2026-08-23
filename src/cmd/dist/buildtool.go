@@ -96,6 +96,7 @@ var bootstrapDirs = []string{
 	"internal/syscall/unix",
 	"internal/types/errors",
 	"internal/unsafeheader",
+	"internal/wasmobj",
 	"internal/xcoff",
 	"internal/zstd",
 	"math/bits",

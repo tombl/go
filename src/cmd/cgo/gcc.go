@@ -20,6 +20,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"internal/wasmobj"
 	"internal/xcoff"
 	"math"
 	"os"
@@ -245,9 +246,9 @@ func (p *Package) Translate(f *File) {
 // loadDefines coerces gcc into spitting out the #defines in use
 // in the file f and saves relevant renamings in f.Name[name].Define.
 // Returns true if env:CC is Clang
-func (f *File) loadDefines(gccOptions []string) bool {
+func (f *File) loadDefines(p *Package, gccOptions []string) bool {
 	var b bytes.Buffer
-	b.WriteString(builtinProlog)
+	b.WriteString(p.builtinProlog())
 	b.WriteString(f.Preamble)
 	stdout := gccDefines(b.Bytes(), gccOptions)
 
@@ -379,7 +380,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 	// whether name denotes a type or an expression.
 
 	var b bytes.Buffer
-	b.WriteString(builtinProlog)
+	b.WriteString(p.builtinProlog())
 	b.WriteString(f.Preamble)
 
 	for i, n := range names {
@@ -520,7 +521,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 		// Check if compiling the preamble by itself causes any errors,
 		// because the messages we've printed out so far aren't helpful
 		// to users debugging preamble mistakes. See issue 8442.
-		preambleErrors := p.gccErrors([]byte(builtinProlog + f.Preamble))
+		preambleErrors := p.gccErrors([]byte(p.builtinProlog() + f.Preamble))
 		if len(preambleErrors) > 0 {
 			error_(token.NoPos, "\n%s errors for preamble:\n%s", gccBaseCmd[0], preambleErrors)
 		}
@@ -545,7 +546,7 @@ func (p *Package) loadDWARF(f *File, ft *fileTypedefs, names []*Name) *debug {
 	// for each entry in names and then dereference the type we
 	// learn for __cgo__i.
 	var b bytes.Buffer
-	b.WriteString(builtinProlog)
+	b.WriteString(p.builtinProlog())
 	b.WriteString(f.Preamble)
 	b.WriteString("#line 1 \"cgo-dwarf-inference\"\n")
 	for i, n := range names {
@@ -1896,6 +1897,17 @@ func (p *Package) gccDebug(stdin []byte, nnames int) (d *dwarf.Data, ints []int6
 			}
 			strs[n] = data[:strlen]
 		}
+	}
+
+	if f, err := wasmobj.Open(ofile); err == nil {
+		d, err := f.DWARF()
+		if err != nil {
+			fatalf("cannot load DWARF output from %s: %v", ofile, err)
+		}
+		// TODO: Decode the linking and data sections to recover constants.
+		// Type-only probes already work, which is enough to expose the next
+		// cgo ABI and linker boundaries on linux/wasm.
+		return d, nil, nil, strs
 	}
 
 	if f, err := macho.Open(ofile); err == nil {
