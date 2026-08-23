@@ -1904,10 +1904,58 @@ func (p *Package) gccDebug(stdin []byte, nnames int) (d *dwarf.Data, ints []int6
 		if err != nil {
 			fatalf("cannot load DWARF output from %s: %v", ofile, err)
 		}
-		// TODO: Decode the linking and data sections to recover constants.
-		// Type-only probes already work, which is enough to expose the next
-		// cgo ABI and linker boundaries on linux/wasm.
-		return d, nil, nil, strs
+		o, err := f.Object()
+		if err != nil {
+			fatalf("cannot load WebAssembly linking data from %s: %v", ofile, err)
+		}
+		for _, s := range o.Symbols {
+			if s.Kind != wasmobj.SymbolData || s.Flags&wasmobj.SymUndefined != 0 {
+				continue
+			}
+			if int(s.Segment) >= len(o.Segments) {
+				fatalf("invalid WebAssembly data segment %d for symbol %s", s.Segment, s.Name)
+			}
+			seg := o.Segments[s.Segment].Data
+			if s.Offset > uint64(len(seg)) || s.Size > uint64(len(seg))-s.Offset {
+				fatalf("WebAssembly data symbol %s extends past segment %d", s.Name, s.Segment)
+			}
+			data := seg[s.Offset : s.Offset+s.Size]
+			switch {
+			case isDebugInts(s.Name):
+				if len(data)%8 != 0 {
+					fatalf("invalid WebAssembly cgo integer data size %d", len(data))
+				}
+				ints = make([]int64, len(data)/8)
+				for i := range ints {
+					ints[i] = int64(binary.LittleEndian.Uint64(data[i*8:]))
+				}
+			case isDebugFloats(s.Name):
+				if len(data)%8 != 0 {
+					fatalf("invalid WebAssembly cgo float data size %d", len(data))
+				}
+				floats = make([]float64, len(data)/8)
+				for i := range floats {
+					floats[i] = math.Float64frombits(binary.LittleEndian.Uint64(data[i*8:]))
+				}
+			default:
+				if n := indexOfDebugStr(s.Name); n != -1 {
+					strdata[n] = string(data)
+					continue
+				}
+				if n := indexOfDebugStrlen(s.Name); n != -1 {
+					if len(data) < 8 {
+						fatalf("invalid WebAssembly cgo string length data size %d", len(data))
+					}
+					strlen := binary.LittleEndian.Uint64(data)
+					if strlen > (1<<(uint(p.IntSize*8)-1) - 1) {
+						fatalf("string literal too big")
+					}
+					strlens[n] = int(strlen)
+				}
+			}
+		}
+		buildStrings()
+		return d, ints, floats, strs
 	}
 
 	if f, err := macho.Open(ofile); err == nil {
