@@ -143,7 +143,7 @@ func main() {
 	if transform == nil || uint32(C.prototype_apply(transform, 41)) != 42 {
 		panic("function pointer")
 	}
-	if got := uint32(C.prototype_apply(C.prototype_increment, 41)); got != 42 {
+	if got := uint32(C.prototype_apply((*[0]byte)(C.prototype_increment), 41)); got != 42 {
 		panic("named C function pointer")
 	}
 	if got, err := C.prototype_set_errno(123); uint32(got) != 7 || err != syscall.Errno(123) {
