@@ -619,6 +619,13 @@ func (ctxt *Link) loadlib() {
 	// Process cgo directives (has to be done before host object loading).
 	ctxt.loadcgodirectives()
 
+	// Let the C toolchain perform whole-program static archive selection for
+	// linux/wasm, but leave the resulting relocatable object for the Go linker
+	// to lay out in the final module.
+	if ctxt.LinkMode == LinkInternal && ctxt.HeadType == objabi.Hlinux && buildcfg.GOARCH == "wasm" && iscgo {
+		wasmPrelinkHostObjects(ctxt)
+	}
+
 	// Conditionally load host objects, or setup for external linking.
 	hostobjs(ctxt)
 	hostlinksetup(ctxt)
@@ -1257,6 +1264,79 @@ func hostobjs(ctxt *Link) {
 	}
 }
 
+// wasmPrelinkHostObjects asks the target C driver to combine all cgo objects
+// and select their static archive closure. The -r output is still a
+// relocatable WebAssembly object: wasm-ld owns archive semantics, while the Go
+// linker remains responsible for the final module and Go continuation ABI.
+func wasmPrelinkHostObjects(ctxt *Link) {
+	if len(hostobj) == 0 {
+		return
+	}
+	for _, h := range hostobj {
+		if h.ld == nil {
+			Exitf("%s: cannot include unrecognized object in linux/wasm cgo prelink", h.pn)
+		}
+	}
+
+	ensureLinkTmpdir()
+	paths := ctxt.hostobjCopy()
+	output := filepath.Join(*flagTmpdir, "go-cgo-native.o")
+
+	argv := append([]string{}, ctxt.extld()...)
+	argv = append(argv, hostlinkArchArgs(ctxt.Arch)...)
+	argv = append(argv, "-Wl,-r", "-o", output)
+	argv = append(argv, paths...)
+	argv = append(argv, ldflag...)
+	argv = append(argv, flagExtldflags...)
+	// Optimization belongs on the final module. In particular, the wasm
+	// driver may otherwise run Binaryen after -r; Binaryen intentionally does
+	// not preserve relocatable linking metadata.
+	argv = append(argv, "-O0")
+	argv = ctxt.passLongArgsInResponseFile(argv, "")
+
+	if ctxt.Debugvlog != 0 {
+		ctxt.Logf("linux/wasm cgo prelink:")
+		for _, arg := range argv {
+			ctxt.Logf(" %q", arg)
+		}
+		ctxt.Logf("\n")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		Exitf("running linux/wasm cgo prelink failed: %v\n%s\n%s", err, cmd, out)
+	} else if len(out) != 0 {
+		ctxt.Logf("%s", out)
+	}
+
+	info, err := os.Stat(output)
+	if err != nil {
+		Exitf("cannot stat linux/wasm cgo prelink output: %v", err)
+	}
+	load := hostobj[0].ld
+	hostobj = []Hostobj{{
+		ld:     load,
+		pkg:    "runtime/cgo",
+		pn:     output,
+		file:   output,
+		length: info.Size(),
+	}}
+}
+
+func ensureLinkTmpdir() {
+	if *flagTmpdir != "" {
+		return
+	}
+	dir, err := os.MkdirTemp("", "go-link-")
+	if err != nil {
+		log.Fatal(err)
+	}
+	*flagTmpdir = dir
+	ownTmpDir = true
+	AtExit(func() {
+		os.RemoveAll(*flagTmpdir)
+	})
+}
+
 func hostlinksetup(ctxt *Link) {
 	if ctxt.LinkMode != LinkExternal {
 		return
@@ -1269,17 +1349,7 @@ func hostlinksetup(ctxt *Link) {
 	*FlagS = false
 
 	// create temporary directory and arrange cleanup
-	if *flagTmpdir == "" {
-		dir, err := os.MkdirTemp("", "go-link-")
-		if err != nil {
-			log.Fatal(err)
-		}
-		*flagTmpdir = dir
-		ownTmpDir = true
-		AtExit(func() {
-			os.RemoveAll(*flagTmpdir)
-		})
-	}
+	ensureLinkTmpdir()
 
 	// change our output to temporary object file
 	if err := ctxt.Out.Close(); err != nil {

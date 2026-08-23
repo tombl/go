@@ -78,7 +78,7 @@ SIGSEGV/SIGFPE panic path.
 
 ## Current unsupported features
 
-- cgo
+- production cgo (the static-cgo linker/runtime prototype is in progress)
 - the race detector
 - asynchronous Go preemption
 - synchronous fault-to-signal translation
@@ -95,18 +95,23 @@ There is no kernel-level reason that statically linked cgo cannot work: the
 platform already runs C and provides shared memory and pthreads. The missing
 pieces are in the Go toolchain and the mixed ABI:
 
-1. Enable cgo for `linux/wasm` in the platform table and audit generated cgo
-   wrappers for 64-bit Go pointers crossing into the 32-bit C ABI.
-2. Add relocatable wasm object support to the Go linker, or add an external
-   link mode in which Go emits relocatable wasm and `wasm-ld` combines it with
-   musl and C objects.
-3. Implement `asmcgocall` to enter C on the M's system/C stack and implement
-   the `cgocallback` path back to the correct g and M.
-4. Integrate `runtime/cgo`, musl TLS, pthread-created threads, callbacks, signal
-   masks, and stack-bound registration with the Worker-per-M model.
-5. Add pointer-rule, callback, blocking-call, C-created-thread, GC, and SMP
-   stress tests. Static cgo should be completed before considering dynamic
-   loading, which is a separate and currently unsupported platform feature.
+1. Finish the aggregate relocatable object's data, constructor, fini, and
+   non-empty C TLS relocations. wasm-ld already owns whole-program static
+   archive selection; the Go linker owns the final module.
+2. Implement `asmcgocall` to enter native-signature C and implement the
+   `cgocallback` path back to the correct g and M. musl crt1 remains the owner
+   of startup and hands off through a native Go entry adapter.
+3. Make libc the sole owner of `memory.grow` in cgo executables. Go requests
+   aligned heap regions through libc instead of advancing a second break.
+4. Complete generated pointer and aggregate translation for the 64-bit Go ABI
+   versus wasm32 C ABI, including checked Go-to-C pointer narrowing.
+5. Add pointer-rule, callback, blocking-call, C-created-thread, TLS-destructor,
+   GC, and SMP stress tests. Static cgo should be completed before considering
+   dynamic loading, which is a separate and currently unsupported platform
+   feature.
+
+The current implementation checkpoint and validated VM probe are documented in
+`cgo-prototype/DESIGN.md`.
 
 ## Validation
 

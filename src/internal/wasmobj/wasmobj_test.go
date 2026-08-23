@@ -31,3 +31,24 @@ func TestRejectsMalformedSection(t *testing.T) {
 		t.Fatal("New accepted a truncated section")
 	}
 }
+
+func TestFunctionImports(t *testing.T) {
+	b := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	b = append(b, SectionType, 6, 1, 0x60, 1, 0x7f, 1, 0x7f)
+	b = append(b, SectionImport, 17, 1, 5, 'l', 'i', 'n', 'u', 'x', 7, 's', 'y', 's', 'c', 'a', 'l', 'l', 0, 0)
+	f, err := New(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := f.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(o.Imports); got != 1 {
+		t.Fatalf("len(Imports) = %d, want 1", got)
+	}
+	got := o.Imports[0]
+	if got.Module != "linux" || got.Name != "syscall" || got.Index != 0 || got.TypeIndex != 0 {
+		t.Fatalf("Imports[0] = %+v", got)
+	}
+}

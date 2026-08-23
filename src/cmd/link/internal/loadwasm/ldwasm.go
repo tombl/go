@@ -83,6 +83,33 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 			l.SetAttrVisibilityHidden(s, true)
 		}
 	}
+	for _, imp := range o.Imports {
+		// The target ABI's kernel functions are genuine module imports.
+		// env imports in relocatable objects are linker-synthesized values or
+		// Go/native bridge symbols and must remain available for resolution.
+		if imp.Module == "env" {
+			continue
+		}
+		if int(imp.TypeIndex) >= len(o.Types) {
+			return nil, fmt.Errorf("loadwasm: %s: import %s.%s has invalid type %d", pn, imp.Module, imp.Name, imp.TypeIndex)
+		}
+		ft, err := goFuncType(o.Types[imp.TypeIndex])
+		if err != nil {
+			return nil, fmt.Errorf("loadwasm: %s: import %s.%s: %v", pn, imp.Module, imp.Name, err)
+		}
+		for i, ws := range o.Symbols {
+			if ws.Kind != wasmobj.SymbolFunction || ws.Index != imp.Index || syms[i] == 0 {
+				continue
+			}
+			l.SetWasmTypeSym(syms[i], typeSyms[imp.TypeIndex])
+			l.SetWasmHostImport(syms[i], obj.WasmImport{
+				Module:       imp.Module,
+				Name:         imp.Name,
+				WasmFuncType: ft,
+			})
+			break
+		}
+	}
 
 	functions := make(map[uint32]wasmobj.Function, len(o.Functions))
 	for _, fn := range o.Functions {
@@ -191,12 +218,19 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 			if name == "__stack_pointer" {
 				typ = objabi.R_WASM_GLOBAL_INDEX
 				target = 0
+			} else if name == "__tls_base" {
+				// Go's eight register globals occupy indices 0 through 7.
+				// Keep LLVM TLS independent of Go's g global and let musl set
+				// this ninth per-instance mutable global at thread entry.
+				typ = objabi.R_WASM_GLOBAL_INDEX
+				target = 0
+				add += 8
 			} else {
 				if off == 0 || bld.Data()[off-1] != 0x23 { // global.get
 					return nil, fmt.Errorf("loadwasm: %s: unsupported global relocation for %s", pn, name)
 				}
 				bld.Data()[off-1] = 0x41 // i32.const
-				if name == "__memory_base" || name == "__table_base" {
+				if name == "__memory_base" || name == "__table_base" || name == "__tls_size" || name == "__tls_align" {
 					typ = objabi.R_WASM_CONST
 					target = 0
 				} else if symKinds[target] == wasmobj.SymbolFunction {
