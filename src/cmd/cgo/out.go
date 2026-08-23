@@ -176,6 +176,7 @@ func (p *Package) writeDefs() {
 			continue
 		}
 
+		wasmFPVar := goarch == "wasm" && n.Kind == "fpvar"
 		if !cVars[n.C] {
 			if *gccgo {
 				fmt.Fprintf(fc, "extern byte *%s;\n", n.C)
@@ -186,15 +187,30 @@ func (p *Package) writeDefs() {
 				// Treat function variables differently
 				// to avoid type conflict errors from LTO
 				// (Link Time Optimization).
-				if n.Kind == "fpvar" {
+				if wasmFPVar {
+					// A Go function address is its continuation PC (PC_F<<16),
+					// whereas the wasm C ABI represents a function pointer as a
+					// raw __indirect_function_table index. Materialize the C
+					// function pointer in native data so the object writer emits a
+					// TABLE_INDEX_I32 relocation, then widen its value in Go below.
+					// Taking &__cgo_name directly would silently pass PC_F<<16 to C.
+					fmt.Fprintf(fm, "extern void %s(void);\n", n.C)
+					fmt.Fprintf(fm, "void (*_cgo_fp_%s)(void) = (void (*)(void))%s;\n", n.C, n.C)
+				} else if n.Kind == "fpvar" {
 					fmt.Fprintf(fm, "extern void %s();\n", n.C)
 				} else {
 					fmt.Fprintf(fm, "extern char %s[];\n", n.C)
 					fmt.Fprintf(fm, "void *_cgohack_%s = %s;\n\n", n.C, n.C)
 				}
-				fmt.Fprintf(fgo2, "//go:linkname __cgo_%s %s\n", n.C, n.C)
-				fmt.Fprintf(fgo2, "//go:cgo_import_static %s\n", n.C)
-				fmt.Fprintf(fgo2, "var __cgo_%s byte\n", n.C)
+				importName := n.C
+				importType := "byte"
+				if wasmFPVar {
+					importName = "_cgo_fp_" + n.C
+					importType = "uint32"
+				}
+				fmt.Fprintf(fgo2, "//go:linkname __cgo_%s %s\n", n.C, importName)
+				fmt.Fprintf(fgo2, "//go:cgo_import_static %s\n", importName)
+				fmt.Fprintf(fgo2, "var __cgo_%s %s\n", n.C, importType)
 			}
 			cVars[n.C] = true
 		}
@@ -216,9 +232,13 @@ func (p *Package) writeDefs() {
 		fmt.Fprintf(fgo2, "var %s ", n.Mangle)
 		conf.Fprint(fgo2, fset, node)
 		if !*gccgo {
-			fmt.Fprintf(fgo2, " = (")
-			conf.Fprint(fgo2, fset, node)
-			fmt.Fprintf(fgo2, ")(unsafe.Pointer(&__cgo_%s))", n.C)
+			if wasmFPVar {
+				fmt.Fprintf(fgo2, " = unsafe.Pointer(uintptr(__cgo_%s))", n.C)
+			} else {
+				fmt.Fprintf(fgo2, " = (")
+				conf.Fprint(fgo2, fset, node)
+				fmt.Fprintf(fgo2, ")(unsafe.Pointer(&__cgo_%s))", n.C)
+			}
 		}
 		fmt.Fprintf(fgo2, "\n")
 	}

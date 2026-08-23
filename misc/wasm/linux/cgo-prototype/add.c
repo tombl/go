@@ -85,7 +85,7 @@ prototype_pointer_table_sum(prototype_pointer_table table)
 	return *table.items[0] + *table.items[1];
 }
 
-static uint32_t
+uint32_t
 prototype_increment(uint32_t value)
 {
 	return value + 1;

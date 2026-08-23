@@ -16,7 +16,9 @@ complete internal-link path:
   zero for ordinary wrappers and errno for two-result cgo calls;
 - Go pointers remain 64-bit while C pointers remain memory32. Generated call
   and export wrappers check narrowing, zero-extend results, and marshal
-  pointers nested in structs and arrays field by field; and
+  pointers nested in aggregate values field by field;
+- named C functions selected in Go are carried as native table indices rather
+  than Go continuation PCs; and
 - libc allocation, direct pointers, `C.CBytes`/`C.GoBytes`, scalar and
   aggregate parameters/results, function pointers, errno, scheduled callbacks,
   and pthread-created callbacks all execute in one program.
@@ -30,6 +32,11 @@ The build remains static and on Go's internal-link path. Dynamic libraries,
 plugins, PIE, the race detector, fork, and asynchronous preemption are outside
 the target platform contract. C `longjmp` or an exception must not cross a Go
 frame.
+
+A pointer to an unknown-length array of C structs whose layout changes at the
+32/64-bit boundary cannot be repacked automatically. Libraries with that API
+shape need an explicit count/accessor wrapper or compact `uintptr_t` transport
+fields. Aggregate values and fixed-size arrays remain generated translations.
 
 See [DESIGN.md](DESIGN.md) for the fixed ownership/ABI decisions and remaining
 validation work.
