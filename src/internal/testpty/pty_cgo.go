@@ -7,7 +7,7 @@
 package testpty
 
 /*
-#define _XOPEN_SOURCE 600
+#cgo CFLAGS: -D_XOPEN_SOURCE=600
 #include <fcntl.h>
 #include <stdlib.h>
 #include <unistd.h>
