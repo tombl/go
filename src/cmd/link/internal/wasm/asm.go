@@ -12,6 +12,7 @@ import (
 	"cmd/link/internal/ld"
 	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
+	"encoding/binary"
 	"fmt"
 	"internal/abi"
 	"internal/buildcfg"
@@ -219,11 +220,54 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 					writeSleb128(wfn, ldr.SymValue(rs)+r.Add())
 				case objabi.R_CALL:
 					writeSleb128(wfn, int64(len(hostImports))+ldr.SymValue(rs)>>16-funcValueOffset)
+				case objabi.R_WASM_CALL:
+					if !ldr.SymType(rs).IsText() {
+						ldr.Errorf(fn, "unresolved WebAssembly C function %s", ldr.SymName(rs))
+						writeSleb128(wfn, 0)
+					} else {
+						writeSleb128(wfn, int64(len(hostImports))+ldr.SymValue(rs)>>16-funcValueOffset)
+					}
+				case objabi.R_WASM_ADDR_LEB:
+					if ldr.SymType(rs) == sym.Sxxx || ldr.SymType(rs) == sym.SHOSTOBJ {
+						ldr.Errorf(fn, "unresolved WebAssembly C data symbol %s", ldr.SymName(rs))
+						writeSleb128(wfn, 0)
+					} else {
+						writeSleb128(wfn, ldr.SymValue(rs)+r.Add())
+					}
 				case objabi.R_WASMIMPORT:
 					writeSleb128(wfn, hostImportMap[rs])
+				case objabi.R_WASM_GLOBAL_INDEX, objabi.R_WASM_TABLE_NUMBER, objabi.R_WASM_CONST:
+					writeUleb128(wfn, uint64(r.Add()))
+				case objabi.R_WASM_TABLE_INDEX:
+					if !ldr.SymType(rs).IsText() {
+						ldr.Errorf(fn, "unresolved WebAssembly C table function %s", ldr.SymName(rs))
+						writeSleb128(wfn, 0)
+					} else {
+						writeSleb128(wfn, ldr.SymValue(rs)>>16+r.Add())
+					}
+				case objabi.R_WASM_TYPE_INDEX:
+					var o obj.WasmFuncType
+					o.Read(ldr.WasmTypeData(rs))
+					t := &wasmFuncType{Params: fieldsToTypes(o.Params), Results: fieldsToTypes(o.Results)}
+					writeUleb128(wfn, uint64(lookupType(t, &types)))
+				case objabi.R_WASM_ADDR_I32:
+					var b [4]byte
+					if ldr.SymType(rs) == sym.Sxxx || ldr.SymType(rs) == sym.SHOSTOBJ {
+						ldr.Errorf(fn, "unresolved WebAssembly C data symbol %s", ldr.SymName(rs))
+					} else {
+						binary.LittleEndian.PutUint32(b[:], uint32(ldr.SymValue(rs)+r.Add()))
+					}
+					wfn.Write(b[:])
 				default:
 					ldr.Errorf(fn, "bad reloc type %d (%s)", r.Type(), sym.RelocName(ctxt.Arch, r.Type()))
 					continue
+				}
+				switch r.Type() {
+				case objabi.R_WASM_GLOBAL_INDEX, objabi.R_WASM_TYPE_INDEX,
+					objabi.R_WASM_TABLE_INDEX, objabi.R_WASM_TABLE_NUMBER,
+					objabi.R_WASM_CONST, objabi.R_WASM_ADDR_I32,
+					objabi.R_WASM_CALL, objabi.R_WASM_ADDR_LEB:
+					off += int32(r.Siz())
 				}
 			}
 			wfn.Write(P[off:])
@@ -234,8 +278,12 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 			typ = lookupType(sig, &types)
 		}
 		if s := ldr.WasmTypeSym(fn); s != 0 {
+			if len(ldr.WasmTypeData(s)) < 8 {
+				ldr.Errorf(fn, "missing WebAssembly function type data in %s", ldr.SymName(s))
+				continue
+			}
 			var o obj.WasmFuncType
-			o.Read(ldr.Data(s))
+			o.Read(ldr.WasmTypeData(s))
 			t := &wasmFuncType{
 				Params:  fieldsToTypes(o.Params),
 				Results: fieldsToTypes(o.Results),

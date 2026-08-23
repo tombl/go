@@ -61,6 +61,7 @@ import (
 	"cmd/link/internal/loader"
 	"cmd/link/internal/loadmacho"
 	"cmd/link/internal/loadpe"
+	"cmd/link/internal/loadwasm"
 	"cmd/link/internal/loadxcoff"
 	"cmd/link/internal/sym"
 )
@@ -1192,6 +1193,11 @@ var internalpkg = []string{
 
 func ldhostobj(ld func(*Link, *bio.Reader, string, int64, string), headType objabi.HeadType, f *bio.Reader, pkg string, length int64, pn string, file string) *Hostobj {
 	isinternal := false
+	if headType == objabi.Hlinux && buildcfg.GOARCH == "wasm" {
+		// linux/wasm is static-only. The Go linker owns the final module and
+		// consumes relocatable WebAssembly objects from every cgo package.
+		isinternal = true
+	}
 	for _, intpkg := range internalpkg {
 		if pkg == intpkg {
 			isinternal = true
@@ -2420,6 +2426,17 @@ func ldobj(ctxt *Link, f *bio.Reader, lib *sym.Library, length int64, pn string,
 	lib.Units = append(lib.Units, unit)
 
 	magic := uint32(c1)<<24 | uint32(c2)<<16 | uint32(c3)<<8 | uint32(c4)
+	if magic == 0x0061736d { // \x00 a s m
+		ldwasm := func(ctxt *Link, f *bio.Reader, pkg string, length int64, pn string) {
+			textp, err := loadwasm.Load(ctxt.loader, ctxt.Arch, ctxt.IncVersion(), f, pkg, length, pn)
+			if err != nil {
+				Errorf("%v", err)
+				return
+			}
+			ctxt.Textp = append(ctxt.Textp, textp...)
+		}
+		return ldhostobj(ldwasm, ctxt.HeadType, f, pkg, length, pn, file)
+	}
 	if magic == 0x7f454c46 { // \x7F E L F
 		ldelf := func(ctxt *Link, f *bio.Reader, pkg string, length int64, pn string) {
 			textp, flags, err := loadelf.Load(ctxt.loader, ctxt.Arch, ctxt.IncVersion(), f, pkg, length, pn, ehdr.Flags)

@@ -3265,6 +3265,13 @@ func flagsNotCompatibleWithInternalLinking(sourceList []string, flagListList [][
 // dynOutGo, if not empty, is a new Go file to build as part of the package.
 // dynOutObj, if not empty, is a new file to add to the generated archive.
 func (b *Builder) dynimport(a *Action, objdir, importGo, cgoExe string, cflags, cgoLDFLAGS, outObj []string) (dynOutGo, dynOutObj string, err error) {
+	// linux/wasm is a static-only target. Its C objects are relocatable wasm
+	// files which the internal linker resolves directly; there is no dynamic
+	// symbol table or interpreter to discover with a probe executable.
+	if cfg.Goos == "linux" && cfg.Goarch == "wasm" {
+		return "", "", nil
+	}
+
 	p := a.Package
 	sh := b.Shell(a)
 
