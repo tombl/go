@@ -21,10 +21,10 @@ fi
 
 linux_module=${WASM_LINUX_MODULE:-}
 if [[ -z $linux_module ]]; then
-	linux_out=$(nix build --no-link --print-out-paths "$distro_root#linux")
+	linux_out=$(nix build --no-link --print-out-paths "$distro_root#kernel")
 	linux_module=$linux_out/dist/index.js
 fi
-runner=${WASM_LINUX_TEST_RUNNER:-"$distro_root/packages/vm-test/run-test.js"}
+runner=${WASM_LINUX_TEST_RUNNER:-"$distro_root/distro/vm-test/run-test.js"}
 
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT

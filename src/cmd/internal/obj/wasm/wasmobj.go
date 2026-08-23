@@ -349,6 +349,7 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 
 	if needMoreStack {
 		p := pMorestack
+		stackNosplit := int64(objabi.StackNosplit(false))
 
 		if framesize <= abi.StackSmall {
 			// small stack: SP <= stackguard
@@ -363,6 +364,20 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			p = appendp(p, AI32WrapI64)
 			p = appendp(p, AI32Load, constAddr(2*int64(ctxt.Arch.PtrSize))) // G.stackguard0
 			p = appendp(p, AI32LeU)
+
+			// A goroutine may resume in a different WebAssembly instance after
+			// another M grew or shrank its stack. Keep stackguard0 for cooperative
+			// preemption, but also enforce the bound derived from the authoritative
+			// stack.lo. In particular, a stale guard must never allow SP to cross
+			// the bottom of the current stack.
+			p = appendp(p, AGet, regAddr(REG_SP))
+			p = appendp(p, AGet, regAddr(REGG))
+			p = appendp(p, AI32WrapI64)
+			p = appendp(p, AI32Load, constAddr(0)) // G.stack.lo
+			p = appendp(p, AI32Const, constAddr(stackNosplit+abi.StackSmall))
+			p = appendp(p, AI32Add)
+			p = appendp(p, AI32LeU)
+			p = appendp(p, AI32Or)
 		} else {
 			// large stack: SP-framesize <= stackguard-StackSmall
 			//              SP <= stackguard+(framesize-StackSmall)
@@ -381,6 +396,15 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			p = appendp(p, AI32Const, constAddr(framesize-abi.StackSmall))
 			p = appendp(p, AI32Add)
 			p = appendp(p, AI32LeU)
+
+			p = appendp(p, AGet, regAddr(REG_SP))
+			p = appendp(p, AGet, regAddr(REGG))
+			p = appendp(p, AI32WrapI64)
+			p = appendp(p, AI32Load, constAddr(0)) // G.stack.lo
+			p = appendp(p, AI32Const, constAddr(stackNosplit+framesize))
+			p = appendp(p, AI32Add)
+			p = appendp(p, AI32LeU)
+			p = appendp(p, AI32Or)
 		}
 		// TODO(neelance): handle wraparound case
 

@@ -180,6 +180,62 @@ func TestNativeThreads(t *testing.T) {
 	runtime.GC()
 }
 
+//go:noinline
+func growStack(depth, seed int) uint64 {
+	// Keep a large frame live across the recursive call. This exercises the
+	// wasm morestack path after a goroutine has migrated between native Ms.
+	var frame [32 << 10]byte
+	for i := range frame {
+		frame[i] = byte(seed + i)
+	}
+	sum := uint64(frame[0]) + uint64(frame[len(frame)-1])
+	if depth != 0 {
+		sum += growStack(depth-1, seed+1)
+	}
+	return sum + uint64(frame[depth%len(frame)])
+}
+
+func TestConcurrentStackGrowth(t *testing.T) {
+	old := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(old)
+
+	const (
+		workers    = 32
+		iterations = 32
+		depth      = 16
+	)
+	want := make([]uint64, workers)
+	for worker := range workers {
+		want[worker] = growStack(depth, worker)
+	}
+
+	var ready sync.WaitGroup
+	ready.Add(workers)
+	start := make(chan struct{})
+	errch := make(chan error, workers)
+	for worker := range workers {
+		go func() {
+			ready.Done()
+			<-start
+			for range iterations {
+				if got := growStack(depth, worker); got != want[worker] {
+					errch <- errors.New("stack data corrupted while growing")
+					return
+				}
+				runtime.Gosched()
+			}
+			errch <- nil
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range workers {
+		if err := <-errch; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestSignalCallback(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGUSR1)
