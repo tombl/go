@@ -92,7 +92,7 @@ var distInfo = map[OSArch]osArchInfo{
 	{"linux", "riscv64"}:   {CgoSupported: true},
 	{"linux", "s390x"}:     {CgoSupported: true},
 	{"linux", "sparc64"}:   {CgoSupported: true, Broken: true},
-	{"linux", "wasm"}:      {},
+	{"linux", "wasm"}:      {CgoSupported: true},
 	{"netbsd", "386"}:      {CgoSupported: true},
 	{"netbsd", "amd64"}:    {CgoSupported: true},
 	{"netbsd", "arm"}:      {CgoSupported: true},

@@ -718,7 +718,7 @@ func (p *Package) writeOutput(f *File, srcfile string) {
 
 	// While we process the vars and funcs, also write gcc output.
 	// Gcc output starts with the preamble.
-	fmt.Fprintf(fgcc, "%s\n", builtinProlog)
+	fmt.Fprintf(fgcc, "%s\n", p.builtinProlog())
 	fmt.Fprintf(fgcc, "%s\n", f.Preamble)
 	fmt.Fprintf(fgcc, "%s\n", gccProlog)
 	fmt.Fprintf(fgcc, "%s\n", tsanProlog)
@@ -1371,7 +1371,7 @@ func (p *Package) writeExportHeader(fgcch io.Writer) {
 		pkg = p.PackagePath
 	}
 	fmt.Fprintf(fgcch, "/* package %s */\n\n", pkg)
-	fmt.Fprintf(fgcch, "%s\n", builtinExportProlog)
+	fmt.Fprintf(fgcch, "%s\n", p.builtinExportProlog())
 
 	// Remove absolute paths from #line comments in the preamble.
 	// They aren't useful for people using the header file,
@@ -1687,16 +1687,41 @@ extern void __msan_unpoison(const volatile void *, size_t);
 // for the C compiler.
 var msanProlog = noMsanProlog
 
+func (p *Package) expandCgoABI(s string) string {
+	return strings.NewReplacer(
+		"GOINTBITS", fmt.Sprint(8*p.IntSize),
+		"CGOPTRBITS", fmt.Sprint(8*p.CPtrSize),
+	).Replace(s)
+}
+
+func (p *Package) builtinProlog() string {
+	return p.expandCgoABI(builtinProlog)
+}
+
+func (p *Package) builtinExportProlog() string {
+	return p.expandCgoABI(builtinExportProlog)
+}
+
 const builtinProlog = `
 #line 1 "cgo-builtin-prolog"
 #include <stddef.h>
+#include <stdint.h>
 
 /* Define intgo when compiling with GCC.  */
+#if CGOPTRBITS != GOINTBITS
+typedef int64_t intgo;
+#else
 typedef ptrdiff_t intgo;
+#endif
 
 #define GO_CGO_GOSTRING_TYPEDEF
+#if CGOPTRBITS != GOINTBITS
+typedef struct { uint64_t p; intgo n; } _GoString_;
+typedef struct { uint64_t p; intgo n; intgo c; } _GoBytes_;
+#else
 typedef struct { const char *p; intgo n; } _GoString_;
 typedef struct { char *p; intgo n; intgo c; } _GoBytes_;
+#endif
 _GoString_ GoString(char *p);
 _GoString_ GoStringN(char *p, int l);
 _GoBytes_ GoBytes(void *p, int n);
@@ -1708,7 +1733,13 @@ __attribute__ ((unused))
 static size_t _GoStringLen(_GoString_ s) { return (size_t)s.n; }
 
 __attribute__ ((unused))
-static const char *_GoStringPtr(_GoString_ s) { return s.p; }
+static const char *_GoStringPtr(_GoString_ s) {
+#if CGOPTRBITS != GOINTBITS
+	return (const char *)(uintptr_t)s.p;
+#else
+	return s.p;
+#endif
+}
 `
 
 const goProlog = `
@@ -1989,12 +2020,17 @@ const builtinExportProlog = `
 #line 1 "cgo-builtin-export-prolog"
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifndef GO_CGO_EXPORT_PROLOGUE_H
 #define GO_CGO_EXPORT_PROLOGUE_H
 
 #ifndef GO_CGO_GOSTRING_TYPEDEF
+#if CGOPTRBITS != GOINTBITS
+typedef struct { uint64_t p; int64_t n; } _GoString_;
+#else
 typedef struct { const char *p; ptrdiff_t n; } _GoString_;
+#endif
 extern size_t _GoStringLen(_GoString_ s);
 extern const char *_GoStringPtr(_GoString_ s);
 #endif
@@ -2003,7 +2039,7 @@ extern const char *_GoStringPtr(_GoString_ s);
 `
 
 func (p *Package) gccExportHeaderProlog() string {
-	return strings.ReplaceAll(gccExportHeaderProlog, "GOINTBITS", fmt.Sprint(8*p.IntSize))
+	return p.expandCgoABI(gccExportHeaderProlog)
 }
 
 // gccExportHeaderProlog is written to the exported header, after the
@@ -2036,7 +2072,11 @@ typedef long long GoInt64;
 typedef unsigned long long GoUint64;
 typedef GoIntGOINTBITS GoInt;
 typedef GoUintGOINTBITS GoUint;
+#if CGOPTRBITS != GOINTBITS
+typedef GoUint64 GoUintptr;
+#else
 typedef size_t GoUintptr;
+#endif
 typedef float GoFloat32;
 typedef double GoFloat64;
 #ifdef _MSC_VER
@@ -2058,15 +2098,26 @@ typedef double _Complex GoComplex128;
   static assertion to make sure the file is being used on architecture
   at least with matching size of GoInt.
 */
+#if CGOPTRBITS != GOINTBITS
+typedef char _check_for_mixed_pointer_width[(sizeof(void*)==CGOPTRBITS/8 && sizeof(GoInt)==GOINTBITS/8) ? 1:-1];
+#else
 typedef char _check_for_GOINTBITS_bit_pointer_matching_GoInt[sizeof(void*)==GOINTBITS/8 ? 1:-1];
+#endif
 
 #ifndef GO_CGO_GOSTRING_TYPEDEF
 typedef _GoString_ GoString;
 #endif
+#if CGOPTRBITS != GOINTBITS
+typedef GoUintptr GoMap;
+typedef GoUintptr GoChan;
+typedef struct { GoUintptr t; GoUintptr v; } GoInterface;
+typedef struct { GoUintptr data; GoInt len; GoInt cap; } GoSlice;
+#else
 typedef void *GoMap;
 typedef void *GoChan;
 typedef struct { void *t; void *v; } GoInterface;
 typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
+#endif
 
 #endif
 
