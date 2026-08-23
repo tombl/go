@@ -262,9 +262,10 @@ type Loader struct {
 	// CgoExports records cgo-exported symbols by SymName.
 	CgoExports map[string]Sym
 
-	WasmExports  []Sym
-	wasmType     map[Sym]Sym    // WebAssembly host-object function types
-	wasmTypeData map[Sym][]byte // retained after external symbol data is emitted
+	WasmExports    []Sym
+	wasmType       map[Sym]Sym            // WebAssembly host-object function types
+	wasmTypeData   map[Sym][]byte         // retained after external symbol data is emitted
+	wasmHostImport map[Sym]obj.WasmImport // native WebAssembly imports from host objects
 
 	// sizeFixups records symbols that we need to fix up the size
 	// after loading. It is very rarely needed, only for a DATA symbol
@@ -1752,6 +1753,21 @@ func (l *Loader) SetWasmTypeData(s Sym, data []byte) {
 		l.wasmTypeData = make(map[Sym][]byte)
 	}
 	l.wasmTypeData[s] = append([]byte(nil), data...)
+}
+
+// SetWasmHostImport records a native WebAssembly import referenced by a host
+// object. Unlike a Go wasmimport stub, the symbol itself has no Go body.
+func (l *Loader) SetWasmHostImport(s Sym, wi obj.WasmImport) {
+	if l.wasmHostImport == nil {
+		l.wasmHostImport = make(map[Sym]obj.WasmImport)
+	}
+	l.wasmHostImport[s] = wi
+}
+
+// WasmHostImport returns native import metadata for a host-object symbol.
+func (l *Loader) WasmHostImport(s Sym) (obj.WasmImport, bool) {
+	wi, ok := l.wasmHostImport[s]
+	return wi, ok
 }
 
 // WasmTypeData returns serialized WebAssembly type data.

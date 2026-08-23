@@ -136,9 +136,19 @@ type Relocation struct {
 	Addend  int64
 }
 
+// An Import describes an imported WebAssembly function. Index is its index in
+// the function index space; TypeIndex addresses Object.Types.
+type Import struct {
+	Module    string
+	Name      string
+	Index     uint32
+	TypeIndex uint32
+}
+
 // An Object is the relocatable-object information needed by a linker.
 type Object struct {
 	Types       []FuncType
+	Imports     []Import
 	Functions   []Function
 	Segments    []DataSegment
 	Symbols     []Symbol
@@ -214,7 +224,7 @@ func (f *File) Object() (*Object, error) {
 		case SectionType:
 			o.Types, err = parseTypes(s.Data)
 		case SectionImport:
-			funcImports, funcTypes, imports, err = parseImports(s.Data)
+			funcImports, funcTypes, imports, o.Imports, err = parseImports(s.Data)
 		case SectionFunction:
 			var defs []uint32
 			defs, err = parseU32Vector(s.Data)
@@ -396,11 +406,11 @@ type importNames struct {
 	table    map[uint32]string
 }
 
-func parseImports(b []byte) (uint32, []uint32, importNames, error) {
+func parseImports(b []byte) (uint32, []uint32, importNames, []Import, error) {
 	d := decoder{b: b}
 	n, err := d.uleb()
 	if err != nil {
-		return 0, nil, importNames{}, err
+		return 0, nil, importNames{}, nil, err
 	}
 	names := importNames{
 		function: make(map[uint32]string),
@@ -411,60 +421,63 @@ func parseImports(b []byte) (uint32, []uint32, importNames, error) {
 	var funcs uint32
 	var globals, tags, tables uint32
 	var types []uint32
+	var imports []Import
 	for range n {
-		if _, err := d.name(); err != nil {
-			return 0, nil, importNames{}, err
+		module, err := d.name()
+		if err != nil {
+			return 0, nil, importNames{}, nil, err
 		}
 		name, err := d.name()
 		if err != nil {
-			return 0, nil, importNames{}, err
+			return 0, nil, importNames{}, nil, err
 		}
 		kind, err := d.byte()
 		if err != nil {
-			return 0, nil, importNames{}, err
+			return 0, nil, importNames{}, nil, err
 		}
 		switch kind {
 		case 0: // function
 			t, err := d.uleb()
 			if err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 			names.function[funcs] = name
+			imports = append(imports, Import{Module: module, Name: name, Index: funcs, TypeIndex: uint32(t)})
 			funcs++
 			types = append(types, uint32(t))
 		case 1: // table
 			names.table[tables] = name
 			tables++
 			if _, err := d.byte(); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 			if err := skipLimits(&d); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 		case 2: // memory
 			if err := skipLimits(&d); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 		case 3: // global
 			names.global[globals] = name
 			globals++
 			if _, err := d.bytes(2); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 		case 4: // tag
 			names.tag[tags] = name
 			tags++
 			if _, err := d.byte(); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 			if _, err := d.uleb(); err != nil {
-				return 0, nil, importNames{}, err
+				return 0, nil, importNames{}, nil, err
 			}
 		default:
-			return 0, nil, importNames{}, fmt.Errorf("unsupported import kind %d", kind)
+			return 0, nil, importNames{}, nil, fmt.Errorf("unsupported import kind %d", kind)
 		}
 	}
-	return funcs, types, names, nil
+	return funcs, types, names, imports, nil
 }
 
 func skipLimits(d *decoder) error {

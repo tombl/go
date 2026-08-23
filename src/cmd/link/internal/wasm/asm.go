@@ -189,6 +189,23 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 					panic(fmt.Sprintf("missing wasm symbol for %s", ldr.SymName(r.Sym())))
 				}
 			}
+			if r.Type() == objabi.R_WASM_CALL {
+				rs := r.Sym()
+				if _, exists := hostImportMap[rs]; exists {
+					continue
+				}
+				if wi, ok := ldr.WasmHostImport(rs); ok {
+					hostImportMap[rs] = int64(len(hostImports))
+					hostImports = append(hostImports, &wasmFunc{
+						Module: wi.Module,
+						Name:   wi.Name,
+						Type: lookupType(&wasmFuncType{
+							Params:  fieldsToTypes(wi.Params),
+							Results: fieldsToTypes(wi.Results),
+						}, &types),
+					})
+				}
+			}
 		}
 	}
 
@@ -221,7 +238,9 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 				case objabi.R_CALL:
 					writeSleb128(wfn, int64(len(hostImports))+ldr.SymValue(rs)>>16-funcValueOffset)
 				case objabi.R_WASM_CALL:
-					if !ldr.SymType(rs).IsText() {
+					if importIndex, ok := hostImportMap[rs]; ok {
+						writeSleb128(wfn, importIndex)
+					} else if !ldr.SymType(rs).IsText() {
 						ldr.Errorf(fn, "unresolved WebAssembly C function %s", ldr.SymName(rs))
 						writeSleb128(wfn, 0)
 					} else {
@@ -500,6 +519,7 @@ func writeGlobalSec(ctxt *ld.Link) {
 		I64, // 5: RET2
 		I64, // 6: RET3
 		I32, // 7: PAUSE
+		I32, // 8: LLVM TLS base (set independently by musl)
 	}
 
 	writeUleb128(ctxt.Out, uint64(len(globalRegs))) // number of globals
