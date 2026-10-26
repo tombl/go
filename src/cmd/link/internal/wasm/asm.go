@@ -11,6 +11,7 @@ import (
 	"cmd/internal/objabi"
 	"cmd/link/internal/ld"
 	"cmd/link/internal/loader"
+	"cmd/link/internal/loadwasm"
 	"cmd/link/internal/sym"
 	"encoding/binary"
 	"fmt"
@@ -46,6 +47,10 @@ const (
 )
 
 // funcValueOffset is the offset between the PC_F value of a function and the index of the function in WebAssembly
+// wasmTLSBaseGlobal is the index of the LLVM __tls_base global; see
+// writeGlobalSec.
+const wasmTLSBaseGlobal = 8
+
 const funcValueOffset = 0x1000 // TODO(neelance): make function addresses play nice with heap addresses
 
 func gentext(ctxt *ld.Link, ldr *loader.Loader) {
@@ -106,7 +111,7 @@ var wasmFuncTypes = map[string]*wasmFuncType{
 	"runtime.wasmSetgGCC":     {Params: []byte{I32}},                                      // native setg callback
 	"__main_argc_argv_envp":   {Params: []byte{I32, I32, I32}, Results: []byte{I32}},      // musl main adapter
 	"__wasm_call_ctors":       {},                                                         // synthesized native constructor dispatcher
-	"__wasm_init_tls":         {},                                                         // synthesized native TLS initializer
+	"__wasm_init_tls":         {Params: []byte{I32}},                                      // synthesized native TLS initializer: block
 }
 
 func assignAddress(ldr *loader.Loader, sect *sym.Section, n int, s loader.Sym, va uint64, isTramp bool) (*sym.Section, int, uint64) {
@@ -353,7 +358,14 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 	if buildcfg.GOOS == "linux" {
 		dataSegments = collectDataSegments()
 		normalDataSegments := len(dataSegments)
+		mainTLS := int32(-1)
 		if tlsData, _ := ldr.WasmTLS(); tlsData != nil {
+			if image := ldr.Lookup(loadwasm.WasmTLSImage, 0); image != 0 && ldr.AttrReachable(image) {
+				// The initial thread uses the image in ordinary data, and new
+				// threads copy its relocated contents.
+				mainTLS = int32(ldr.SymValue(image))
+				tlsData = relocatedData(ldr.SymValue(image), len(tlsData))
+			}
 			tlsSegment := len(dataSegments)
 			dataSegments = append(dataSegments, &dataSegment{data: tlsData})
 			if tlsInitFn >= 0 {
@@ -368,7 +380,7 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 		fns = append(fns, &wasmFunc{
 			Name: "wasm_linux_init_memory",
 			Type: nullType,
-			Code: linuxMemoryInitCode(dataSegments[:normalDataSegments]),
+			Code: linuxMemoryInitCode(dataSegments[:normalDataSegments], mainTLS),
 		})
 
 		entry := ldr.Lookup("_start", 0)
@@ -567,7 +579,7 @@ func writeGlobalSec(ctxt *ld.Link, ldr *loader.Loader) {
 		I64, // 5: RET2
 		I64, // 6: RET3
 		I32, // 7: PAUSE
-		I32, // 8: LLVM TLS base (set independently by musl)
+		I32, // 8: LLVM TLS base (wasmTLSBaseGlobal)
 	}
 
 	writeUleb128(ctxt.Out, uint64(len(globalRegs))) // number of globals
@@ -760,9 +772,27 @@ func collectDataSegments() []*dataSegment {
 	return segments
 }
 
-func linuxMemoryInitCode(segments []*dataSegment) []byte {
+// relocatedData returns the final contents of size bytes of data at addr.
+func relocatedData(addr int64, size int) []byte {
+	for _, ds := range dataSects {
+		start := int64(ds.sect.Vaddr)
+		if addr >= start && addr+int64(size) <= start+int64(len(ds.data)) {
+			return append([]byte(nil), ds.data[addr-start:addr-start+int64(size)]...)
+		}
+	}
+	panic(fmt.Sprintf("wasm: no data section holds %#x+%d", addr, size))
+}
+
+// linuxMemoryInitCode initializes linear memory from segments and, if
+// mainTLS is non-negative, points the initial thread's __tls_base at it.
+func linuxMemoryInitCode(segments []*dataSegment, mainTLS int32) []byte {
 	w := new(bytes.Buffer)
 	writeUleb128(w, 0) // local declarations
+	if mainTLS >= 0 {
+		writeI32Const(w, mainTLS)
+		w.WriteByte(0x24) // global.set __tls_base
+		writeUleb128(w, wasmTLSBaseGlobal)
+	}
 	for i, seg := range segments {
 		writeI32Const(w, seg.offset)
 		writeI32Const(w, 0)
@@ -779,10 +809,16 @@ func linuxMemoryInitCode(segments []*dataSegment) []byte {
 	return w.Bytes()
 }
 
+// wasmTLSInitCode returns the body of __wasm_init_tls(block), which, as with
+// wasm-ld, points __tls_base at block and copies the TLS image there.
 func wasmTLSInitCode(segment, size int) []byte {
 	w := new(bytes.Buffer)
 	writeUleb128(w, 0) // local declarations
-	w.WriteByte(0x20)  // local.get destination
+	w.WriteByte(0x20)  // local.get block
+	writeUleb128(w, 0)
+	w.WriteByte(0x24) // global.set __tls_base
+	writeUleb128(w, wasmTLSBaseGlobal)
+	w.WriteByte(0x20) // local.get destination
 	writeUleb128(w, 0)
 	writeI32Const(w, 0)
 	writeI32Const(w, int32(size))

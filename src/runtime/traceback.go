@@ -1680,9 +1680,16 @@ func isSystemGoroutine(gp *g, fixed bool) bool {
 // to Go will not show a traceback for the C portion of the call stack.
 //
 // SetCgoTraceback should be called only once, ideally from an init function.
+//
+// On linux/wasm, SetCgoTraceback has no effect: Go's pointers there are 64
+// bits while C's are 32, and the callback structures are not yet marshaled
+// between the two.
 func SetCgoTraceback(version int, traceback, context, symbolizer unsafe.Pointer) {
 	if version != 0 {
 		panic("unsupported version")
+	}
+	if GOOS == "linux" && GOARCH == "wasm" {
+		return
 	}
 
 	if cgoTraceback != nil && cgoTraceback != traceback ||

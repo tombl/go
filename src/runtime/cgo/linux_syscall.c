@@ -23,10 +23,20 @@
  */
 
 // argset_t matches runtime/cgocall.go:argset.
+#ifdef __wasm__
+// Go's pointers and uintptrs are 64 bits on linux/wasm, while C's are 32.
+typedef struct {
+	uint64_t args;
+	uint64_t retval;
+} argset_t;
+#define ARG(x, i) (((uint64_t *)(uintptr_t)(x)->args)[i])
+#else
 typedef struct {
 	uintptr_t* args;
 	uintptr_t retval;
 } argset_t;
+#define ARG(x, i) ((x)->args[i])
+#endif
 
 // libc backed posix-compliant syscalls.
 
@@ -37,49 +47,58 @@ typedef struct {
   } else                           \
     x->retval = ret
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setegid(argset_t* x) {
-	SET_RETVAL(setegid((gid_t) x->args[0]));
+	SET_RETVAL(setegid((gid_t) ARG(x, 0)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_seteuid(argset_t* x) {
-	SET_RETVAL(seteuid((uid_t) x->args[0]));
+	SET_RETVAL(seteuid((uid_t) ARG(x, 0)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setgid(argset_t* x) {
-	SET_RETVAL(setgid((gid_t) x->args[0]));
+	SET_RETVAL(setgid((gid_t) ARG(x, 0)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setgroups(argset_t* x) {
-	SET_RETVAL(setgroups((size_t) x->args[0], (const gid_t *) x->args[1]));
+	SET_RETVAL(setgroups((size_t) ARG(x, 0), (const gid_t *) ARG(x, 1)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setregid(argset_t* x) {
-	SET_RETVAL(setregid((gid_t) x->args[0], (gid_t) x->args[1]));
+	SET_RETVAL(setregid((gid_t) ARG(x, 0), (gid_t) ARG(x, 1)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setresgid(argset_t* x) {
-	SET_RETVAL(setresgid((gid_t) x->args[0], (gid_t) x->args[1],
-			     (gid_t) x->args[2]));
+	SET_RETVAL(setresgid((gid_t) ARG(x, 0), (gid_t) ARG(x, 1),
+			     (gid_t) ARG(x, 2)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setresuid(argset_t* x) {
-	SET_RETVAL(setresuid((uid_t) x->args[0], (uid_t) x->args[1],
-			     (uid_t) x->args[2]));
+	SET_RETVAL(setresuid((uid_t) ARG(x, 0), (uid_t) ARG(x, 1),
+			     (uid_t) ARG(x, 2)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setreuid(argset_t* x) {
-	SET_RETVAL(setreuid((uid_t) x->args[0], (uid_t) x->args[1]));
+	SET_RETVAL(setreuid((uid_t) ARG(x, 0), (uid_t) ARG(x, 1)));
+	CGO_ASMCGOCALL_RETURN;
 }
 
-void
+CGO_ASMCGOCALL_RETURN_TYPE
 _cgo_libc_setuid(argset_t* x) {
-	SET_RETVAL(setuid((uid_t) x->args[0]));
+	SET_RETVAL(setuid((uid_t) ARG(x, 0)));
+	CGO_ASMCGOCALL_RETURN;
 }

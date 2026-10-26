@@ -201,7 +201,7 @@ func (p *Package) writeDefs() {
 				importName := n.C
 				importType := "byte"
 				if wasmFPVar {
-					importName = "_cgo_fp_" + n.C
+					importName = wasmFPCell(n.C)
 					importType = "uint32"
 				}
 				fmt.Fprintf(fgo2, "//go:linkname __cgo_%s %s\n", n.C, importName)
@@ -862,7 +862,7 @@ func (p *Package) writeOutput(f *File, srcfile string) {
 				// a TABLE_INDEX_I32 relocation, then widen its value in Go.
 				// This object includes the source preamble, so the declaration is
 				// available and the cell participates in the final linux/wasm link.
-				fmt.Fprintf(fgcc, "__typeof__(&%s) _cgo_fp_%s = &%s;\n", n.C, n.C, n.C)
+				fmt.Fprintf(fgcc, "__typeof__(&%s) %s = &%s;\n", n.C, wasmFPCell(n.C), n.C)
 			}
 		}
 		if n.FuncType != nil {
@@ -872,6 +872,13 @@ func (p *Package) writeOutput(f *File, srcfile string) {
 
 	fgo1.Close()
 	fgcc.Close()
+}
+
+// wasmFPCell returns the name of the linux/wasm cell holding the C function
+// pointer to name. Every cgo package that takes the address of the same C
+// function defines its own cell, so include the package's prefix.
+func wasmFPCell(name string) string {
+	return "_cgo" + cPrefix + "_fp_" + name
 }
 
 // fixGo converts the internal Name.Go field into the name we should show

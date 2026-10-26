@@ -41,15 +41,31 @@ uint32_t prototype_call_go_pointer(uint32_t value);
 uint32_t prototype_call_go_pointer_return(uint32_t value);
 uint32_t prototype_call_go_buffer(uint32_t *data, uint32_t length);
 uint32_t prototype_thread_call_go(uint32_t value);
+uint32_t prototype_tls_bump(void);
+uint32_t prototype_tls_constructor_passed(void);
+uint32_t prototype_retire_init(void);
+void prototype_retire_mark(void);
+uint32_t prototype_retired(void);
+uint32_t prototype_thread_tls(void);
 */
 import "C"
 
 import (
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"cgo-prototype/fpcell"
 )
+
+// Keep the main goroutine on the initial thread throughout, so that tests
+// can rely on other goroutines running on Go-created pthreads.
+func init() {
+	runtime.LockOSThread()
+}
 
 //go:noinline
 func callbackStack(depth int, value uint32) uint32 {
@@ -196,5 +212,107 @@ func main() {
 			panic(got)
 		}
 	}
+	// The initial thread's C TLS is initialized before C constructors run.
+	if C.prototype_tls_constructor_passed() == 0 {
+		panic("C constructor saw uninitialized thread-local storage")
+	}
+
+	// C TLS is per thread: the calling thread's copy keeps counting, while a
+	// new pthread sees a fresh copy of the initialized image.
+	runtime.LockOSThread()
+	first := uint32(C.prototype_tls_bump())
+	if first < 124 {
+		panic(first)
+	}
+	if got := uint32(C.prototype_tls_bump()); got != first+1 {
+		panic(got)
+	}
+	runtime.UnlockOSThread()
+	if got := uint32(C.prototype_thread_tls()); got != 0 {
+		panic(got)
+	}
+	println("cgo prototype: C thread-local storage passed")
+
+	// A goroutine that exits while locked retires its thread, which must
+	// leave through pthread_exit (running TSD destructors) and let later Ms
+	// reuse the retired threads' resources. Keep the main goroutine on the
+	// initial thread (see init) so that every retiring goroutine runs on a
+	// Go-created pthread.
+	if C.prototype_retire_init() == 0 {
+		panic("pthread_key_create failed")
+	}
+	for i := 0; i < 4; i++ {
+		done := make(chan uint32)
+		go func() {
+			runtime.LockOSThread()
+			C.prototype_retire_mark()
+			done <- uint32(C.prototype_add32(C.uint32_t(i), 1))
+		}()
+		if got := <-done; got != uint32(i)+1 {
+			panic(got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for deadline := time.Now().Add(10 * time.Second); C.prototype_retired() < 4; {
+		if time.Now().After(deadline) {
+			panic("retired Go threads did not exit through pthread_exit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	locked := make(chan uint32)
+	for i := 0; i < 4; i++ {
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			locked <- uint32(C.prototype_thread_call_go(C.uint32_t(200 + i)))
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		if got := <-locked; got < 202 || got > 205 {
+			panic(got)
+		}
+	}
+	println("cgo prototype: retired locked threads passed")
+
+	// Two cgo packages taking the address of the same C function each have
+	// their own cell, and both hold the same table index.
+	if free := unsafe.Pointer(C.free); free == nil || free != fpcell.Free() {
+		panic("C.free function pointers differ across packages")
+	}
+	println("cgo prototype: cross-package C function pointers passed")
+
+	// The runtime mirrors os.Setenv into the C environment.
+	name := C.CString("CGO_PROTOTYPE_ENV")
+	if err := os.Setenv("CGO_PROTOTYPE_ENV", "value"); err != nil {
+		panic(err)
+	}
+	if got := C.GoString(C.getenv(name)); got != "value" {
+		panic("C getenv after os.Setenv = " + got)
+	}
+	if err := os.Unsetenv("CGO_PROTOTYPE_ENV"); err != nil {
+		panic(err)
+	}
+	if C.getenv(name) != nil {
+		panic("C getenv after os.Unsetenv is set")
+	}
+	C.free(unsafe.Pointer(name))
+	println("cgo prototype: C environment passed")
+
+	// With cgo, syscall's credential calls go through libc so that every
+	// thread changes together. Values and errno must cross the boundary.
+	if err := syscall.Setgroups([]int{0}); err != nil {
+		panic(err)
+	}
+	if err := syscall.Setgid(0); err != nil {
+		panic(err)
+	}
+	if err := syscall.Setresuid(0, 0, 0); err != nil {
+		panic(err)
+	}
+	if err := syscall.Setuid(-1); err != syscall.EINVAL {
+		panic(err)
+	}
+	println("cgo prototype: libc credential calls passed")
+
 	println("cgo prototype: C-created pthread callbacks passed")
 }

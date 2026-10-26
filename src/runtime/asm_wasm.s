@@ -394,14 +394,30 @@ TEXT crosscall1(SB), NOSPLIT|NOFRAME, $0
 	Get R2
 	Get R1
 	CallIndirect $1
+	// fn (mstart) returns normally when a cgo M exits, so that the pthread
+	// library can free its stack. As in a wasmexport wrapper, push a return
+	// address naming crosscall1 so that this normal return can be told apart
+	// from the continuations after a stack switch.
+	Get SP
+	I32Const $8
+	I32Sub
+	Set SP
+	Get SP
+	I64Const $crosscall1(SB)
+	I64Store $0
 	I32Const $0
 	Get R0
 	CallIndirect $0
-	Drop
 	// A Go continuation returns 1 when a stack switch unwinds the native
 	// WebAssembly call stack. Resume from the PC saved on the linear Go stack
-	// just as the module entry wrapper does.
-	Call wasm_pc_f_loop(SB)
+	// until fn returns normally to crosscall1.
+	If
+		I64Const $crosscall1(SB)
+		I64Const $16
+		I64ShrU
+		I32WrapI64
+		Call wasm_pc_f_loop_export(SB)
+	End
 	Return
 
 // void setg_gcc(void *g). Each pthread is a separate WebAssembly instance,

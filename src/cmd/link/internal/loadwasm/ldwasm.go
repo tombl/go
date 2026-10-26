@@ -144,8 +144,25 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 		tlsBase[uint32(i)] = uint64(len(tlsData))
 		tlsData = append(tlsData, seg.Data...)
 	}
+	// The TLS image also lives in ordinary data as the initial thread's TLS
+	// block. There, data relocations within it resolve normally, and the
+	// final wasm writer copies the relocated bytes into the template that
+	// __wasm_init_tls gives each new thread.
+	var tlsImage loader.Sym
 	if len(tlsSegments) != 0 {
 		l.SetWasmTLS(tlsData, tlsAlign)
+		tlsImage = l.LookupOrCreateSym(WasmTLSImage, 0)
+		bld := l.MakeSymbolUpdater(tlsImage)
+		bld.SetType(sym.SNOPTRDATA)
+		bld.SetData(append([]byte(nil), tlsData...))
+		bld.SetSize(int64(len(tlsData)))
+		bld.SetAlign(int32(tlsAlign))
+	}
+	keepTLSImage := func(s loader.Sym) {
+		if tlsImage != 0 {
+			r, _ := l.MakeSymbolUpdater(s).AddRel(objabi.R_KEEP)
+			r.SetSym(tlsImage)
+		}
 	}
 
 	for _, imp := range o.Imports {
@@ -295,6 +312,7 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 		textp = append(textp, ctors)
 	}
 	if tls := synthNativeFunction(l, "__wasm_init_tls"); tls != 0 {
+		keepTLSImage(tls)
 		textp = append(textp, tls)
 	}
 
@@ -304,11 +322,20 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 			if !ok {
 				return nil, fmt.Errorf("loadwasm: %s: DATA relocation at %#x is outside a segment", pn, wr.Offset)
 			}
-			ownerIndex, ownerOff, ok := enclosingDataSymbol(o.Symbols, segIndex, segOff, 4)
-			if !ok || syms[ownerIndex] == 0 {
-				return nil, fmt.Errorf("loadwasm: %s: DATA relocation at %#x has no symbol owner", pn, wr.Offset)
+			var bld *loader.SymbolBuilder
+			var ownerOff uint64
+			if tlsSegments[segIndex] {
+				// Relocate the TLS image; see tlsImage.
+				bld = l.MakeSymbolUpdater(tlsImage)
+				ownerOff = tlsBase[segIndex] + segOff
+			} else {
+				ownerIndex, off, ok := enclosingDataSymbol(o.Symbols, segIndex, segOff, 4)
+				if !ok || syms[ownerIndex] == 0 {
+					return nil, fmt.Errorf("loadwasm: %s: DATA relocation at %#x has no symbol owner", pn, wr.Offset)
+				}
+				bld = l.MakeSymbolUpdater(syms[ownerIndex])
+				ownerOff = off
 			}
-			bld := l.MakeSymbolUpdater(syms[ownerIndex])
 			// A zero-filled input symbol is normally represented as BSS with no
 			// backing bytes. A relocation makes the final contents non-zero, so
 			// materialize the symbol before attaching the relocation or Datblk
@@ -411,11 +438,13 @@ func Load(l *loader.Loader, arch *sys.Arch, localSymVersion int, f *bio.Reader, 
 				target = 0
 			} else if name == "__tls_base" {
 				// Go's eight register globals occupy indices 0 through 7.
-				// Keep LLVM TLS independent of Go's g global and let musl set
-				// this ninth per-instance mutable global at thread entry.
+				// Keep LLVM TLS independent of Go's g global. The module's
+				// start sets this ninth per-instance mutable global for the
+				// initial thread, and __wasm_init_tls for new threads.
 				typ = objabi.R_WASM_GLOBAL_INDEX
 				target = 0
 				add += 8
+				keepTLSImage(owner)
 			} else {
 				if off == 0 || bld.Data()[off-1] != 0x23 { // global.get
 					return nil, fmt.Errorf("loadwasm: %s: unsupported global relocation for %s", pn, name)
@@ -583,3 +612,7 @@ func lebSize(b []byte) uint8 {
 	}
 	return 0
 }
+
+// WasmTLSImage names the data symbol holding the initial thread's TLS block,
+// whose relocated contents are also every new thread's TLS template.
+const WasmTLSImage = "go:wasm.tlsimage"

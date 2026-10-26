@@ -49,7 +49,13 @@ _cgo_sys_thread_start(ThreadStart *ts)
 #endif
 
 	// Leave stacklo=0 and set stackhi=size; mstart will do the rest.
+#ifdef __wasm__
+	// G describes the native layout; Go's stack fields are 64 bits on
+	// linux/wasm while C's pointers are 32.
+	((uint64 *)ts->g)[1] = size;
+#else
 	ts->g->stackhi = size;
+#endif
 	err = _cgo_try_pthread_create(&p, &attr, threadentry, ts);
 
 	pthread_sigmask(SIG_SETMASK, &oset, nil);

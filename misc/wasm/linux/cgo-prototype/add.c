@@ -154,6 +154,92 @@ prototype_call_go_buffer(uint32_t *data, uint32_t length)
 	return output;
 }
 
+// Compiler TLS: each thread starts from the initialized image, including
+// initializers that need relocation.
+static __thread uint32_t prototype_tls = 123;
+static uint32_t prototype_tls_target = 7;
+// volatile keeps the pointer, and so its relocated initializer, in the
+// TLS image.
+static __thread uint32_t *volatile prototype_tls_pointer = &prototype_tls_target;
+
+static int
+prototype_tls_fresh(void)
+{
+	return prototype_tls == 123 && prototype_tls_pointer == &prototype_tls_target && *prototype_tls_pointer == 7;
+}
+
+// A constructor runs on the initial thread before Go starts.
+static int prototype_tls_constructor_ok;
+
+__attribute__((constructor)) static void
+prototype_tls_constructor(void)
+{
+	prototype_tls_constructor_ok = prototype_tls_fresh();
+}
+
+uint32_t
+prototype_tls_constructor_passed(void)
+{
+	return prototype_tls_constructor_ok;
+}
+
+uint32_t
+prototype_tls_bump(void)
+{
+	return ++prototype_tls;
+}
+
+static void *
+prototype_tls_thread(void *opaque)
+{
+	uint32_t *seen = opaque;
+	seen[0] = prototype_tls_fresh() ? prototype_tls : 0;
+	seen[1] = prototype_tls_bump();
+	return 0;
+}
+
+uint32_t
+prototype_thread_tls(void)
+{
+	pthread_t thread;
+	uint32_t seen[2] = { 0, 0 };
+
+	if (pthread_create(&thread, 0, prototype_tls_thread, seen) != 0)
+		return UINT32_MAX;
+	if (pthread_join(thread, 0) != 0)
+		return UINT32_MAX;
+	return seen[0] == 123 && seen[1] == 124 ? 0 : seen[0] << 16 | seen[1];
+}
+
+// A pthread-specific value whose destructor counts threads that exit
+// through pthread_exit, as a retiring Go M must.
+static pthread_key_t prototype_retire_key;
+static uint32_t prototype_retired_count;
+
+static void
+prototype_retire_destructor(void *value)
+{
+	__atomic_fetch_add(&prototype_retired_count, 1, __ATOMIC_SEQ_CST);
+}
+
+uint32_t
+prototype_retire_init(void)
+{
+	return pthread_key_create(&prototype_retire_key, prototype_retire_destructor) == 0;
+}
+
+void
+prototype_retire_mark(void)
+{
+	pthread_setspecific(prototype_retire_key, (void *)1);
+}
+
+uint32_t
+prototype_retired(void)
+{
+	return __atomic_load_n(&prototype_retired_count, __ATOMIC_SEQ_CST);
+}
+
 struct prototype_callback_args {
 	uint32_t value;
 	uint32_t result;
