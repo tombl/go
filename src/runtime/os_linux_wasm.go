@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	_EINTR  = 4
-	_EAGAIN = 11
-	_ENOMEM = 12
-	_EINVAL = 22
-	_ENOSYS = 38
+	_EINTR   = 4
+	_EAGAIN  = 11
+	_ENOMEM  = 12
+	_EINVAL  = 22
+	_ENOSYS  = 38
+	_ENOTSUP = 95
 
 	_O_CREAT    = 0x40
 	_O_WRONLY   = 0x1
@@ -30,7 +31,7 @@ const (
 	_SYS_PIPE2                  = 59
 	_SYS_EXIT                   = 93
 	_SYS_EXIT_GROUP             = 94
-	_SYS_FUTEX                  = 98
+	_SYS_FUTEX_TIME64           = 422
 	_SYS_CLOCK_NANOSLEEP_TIME64 = 407
 	_SYS_CLOCK_GETTIME64        = 403
 	_SYS_SCHED_YIELD            = 124
@@ -407,12 +408,12 @@ func futexsleep(addr *uint32, val uint32, ns int64) {
 		ts.nsec = ns % 1e9
 		tsp = unsafe.Pointer(&ts)
 	}
-	linuxsys.Syscall6(_SYS_FUTEX, uintptr(unsafe.Pointer(addr)), _FUTEX_WAIT_PRIVATE, uintptr(val), uintptr(tsp), 0, 0)
+	linuxsys.Syscall6(_SYS_FUTEX_TIME64, uintptr(unsafe.Pointer(addr)), _FUTEX_WAIT_PRIVATE, uintptr(val), uintptr(tsp), 0, 0)
 }
 
 //go:nosplit
 func futexwakeup(addr *uint32, cnt uint32) {
-	linuxsys.Syscall6(_SYS_FUTEX, uintptr(unsafe.Pointer(addr)), _FUTEX_WAKE_PRIVATE, uintptr(cnt), 0, 0, 0)
+	linuxsys.Syscall6(_SYS_FUTEX_TIME64, uintptr(unsafe.Pointer(addr)), _FUTEX_WAKE_PRIVATE, uintptr(cnt), 0, 0, 0)
 }
 
 //go:nosplit
@@ -525,4 +526,15 @@ func sysargs(_ int32, _ **byte) {
 		vdsoauxv(tag, val)
 	}
 	auxv = out[auxstart : pos-2 : pos-2]
+}
+
+// syscall_runtime_doAllThreadsSyscall would run a system call on every
+// thread by signalling each M, as on other Linux ports. linux/wasm has no
+// per-thread signal path for it yet, so report ENOTSUP, as AllThreadsSyscall
+// already does in cgo binaries, rather than leaving syscall's reference to it
+// unresolved.
+//
+//go:linkname syscall_runtime_doAllThreadsSyscall syscall.runtime_doAllThreadsSyscall
+func syscall_runtime_doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr) {
+	return ^uintptr(0), ^uintptr(0), _ENOTSUP
 }

@@ -5,10 +5,13 @@
 package unix
 
 import (
+	"internal/goarch"
 	"syscall"
 )
 
-const is64bit = ^uint(0) >> 63 // 0 for 32-bit hosts, 1 for 64-bit ones.
+// 0 for 32-bit kernel ABIs, 1 for 64-bit ones. linux/wasm has 64-bit Go
+// pointers but the wasm32 kernel's ILP32 siginfo.
+const is64bit = ^uint(0) >> 63 &^ goarch.IsWasm
 
 // SiginfoChild is a struct filled in by Linux waitid syscall.
 // In C, siginfo_t contains a union with multiple members;

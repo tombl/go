@@ -18,7 +18,8 @@ import (
 func TestSiginfoChildLayout(t *testing.T) {
 	var si unix.SiginfoChild
 
-	const host64bit = goarch.PtrSize == 8
+	// linux/wasm has 64-bit pointers but the wasm32 kernel's ILP32 siginfo.
+	const host64bit = goarch.PtrSize == 8 && goarch.IsWasm == 0
 
 	if v := unsafe.Sizeof(si); v != 128 {
 		t.Fatalf("sizeof: got %d, want 128", v)

@@ -179,6 +179,11 @@ linux_386)
 	mksysnum="./mksysnum_linux.pl /usr/include/asm/unistd_32.h"
 	mktypes="GOARCH=$GOARCH go tool cgo -godefs"
 	;;
+linux_wasm)
+	# mkerrors and mktypes cannot run: cgo cannot read wasm objects.
+	mkerrors=
+	mksyscall="./mksyscall_linux_wasm.sh"
+	;;
 linux_amd64)
 	unistd_h=$(ls -1 /usr/include/asm/unistd_64.h /usr/include/x86_64-linux-gnu/asm/unistd_64.h 2>/dev/null | head -1)
 	if [ "$unistd_h" = "" ]; then

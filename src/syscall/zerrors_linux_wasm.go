@@ -1158,9 +1158,9 @@ const (
 	RUSAGE_THREAD                    = 0x1
 	SCM_CREDENTIALS                  = 0x2
 	SCM_RIGHTS                       = 0x1
-	SCM_TIMESTAMP                    = 0x1d
-	SCM_TIMESTAMPING                 = 0x25
-	SCM_TIMESTAMPNS                  = 0x23
+	SCM_TIMESTAMP                    = 0x3f
+	SCM_TIMESTAMPING                 = 0x41
+	SCM_TIMESTAMPNS                  = 0x40
 	SCM_WIFI_STATUS                  = 0x29
 	SHUT_RD                          = 0x0
 	SHUT_RDWR                        = 0x2
@@ -1295,7 +1295,7 @@ const (
 	SO_RCVBUF                        = 0x8
 	SO_RCVBUFFORCE                   = 0x21
 	SO_RCVLOWAT                      = 0x12
-	SO_RCVTIMEO                      = 0x14
+	SO_RCVTIMEO                      = 0x42
 	SO_REUSEADDR                     = 0x2
 	SO_REUSEPORT                     = 0xf
 	SO_RXQ_OVFL                      = 0x28
@@ -1306,10 +1306,10 @@ const (
 	SO_SNDBUF                        = 0x7
 	SO_SNDBUFFORCE                   = 0x20
 	SO_SNDLOWAT                      = 0x13
-	SO_SNDTIMEO                      = 0x15
-	SO_TIMESTAMP                     = 0x1d
-	SO_TIMESTAMPING                  = 0x25
-	SO_TIMESTAMPNS                   = 0x23
+	SO_SNDTIMEO                      = 0x43
+	SO_TIMESTAMP                     = 0x3f
+	SO_TIMESTAMPING                  = 0x41
+	SO_TIMESTAMPNS                   = 0x40
 	SO_TYPE                          = 0x3
 	SO_WIFI_STATUS                   = 0x29
 	S_BLKSIZE                        = 0x200
