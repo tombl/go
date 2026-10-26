@@ -278,6 +278,48 @@ main.x: relocation target main.zero not defined
 	}
 }
 
+func TestUnresolvedWasmLinux(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	t.Parallel()
+
+	tmpdir := t.TempDir()
+
+	write := func(name, content string) {
+		err := os.WriteFile(filepath.Join(tmpdir, name), []byte(content), 0666)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The wasm writer encodes calls and addresses in function bodies itself,
+	// so it must diagnose undefined targets rather than emit an invalid
+	// module.
+	write("go.mod", "module testunresolved\n")
+	write("main.go", `package main
+
+import _ "unsafe"
+
+//go:linkname missingFunc main.missingFuncImpl
+func missingFunc()
+
+func main() {
+	missingFunc()
+}
+`)
+	cmd := goCmd(t, "build")
+	cmd.Dir = tmpdir
+	cmd.Env = append(cmd.Env,
+		"GOARCH=wasm", "GOOS=linux", "CGO_ENABLED=0", "GOPATH="+filepath.Join(tmpdir, "_gopath"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected build to fail, but it succeeded")
+	}
+	if !strings.Contains(string(out), "main.main: call to undefined function main.missingFuncImpl") {
+		t.Fatalf("unexpected build output:\n%s", out)
+	}
+}
+
 func TestIssue33979(t *testing.T) {
 	testenv.MustHaveGoBuild(t)
 	testenv.MustHaveCGO(t)

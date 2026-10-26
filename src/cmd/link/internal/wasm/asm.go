@@ -216,8 +216,18 @@ func asmb2(ctxt *ld.Link, ldr *loader.Loader) {
 				rs := r.Sym()
 				switch r.Type() {
 				case objabi.R_ADDR:
+					if ldr.SymType(rs) == sym.Sxxx || ldr.SymType(rs) == sym.SHOSTOBJ {
+						// This writer bypasses the generic relocation pass and
+						// its check for undefined targets.
+						ldr.Errorf(fn, "relocation target %s not defined", ldr.SymName(rs))
+					}
 					writeSleb128(wfn, ldr.SymValue(rs)+r.Add())
 				case objabi.R_CALL:
+					if !ldr.SymType(rs).IsText() {
+						ldr.Errorf(fn, "call to undefined function %s", ldr.SymName(rs))
+						writeSleb128(wfn, 0)
+						break
+					}
 					writeSleb128(wfn, int64(len(hostImports))+ldr.SymValue(rs)>>16-funcValueOffset)
 				case objabi.R_WASMIMPORT:
 					writeSleb128(wfn, hostImportMap[rs])
